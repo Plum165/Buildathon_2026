@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v23-risk-defense"
+    name = "hybrid-v24-snowball"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -1347,7 +1347,26 @@ class Bot:
         reload_cover_dip = gun_reloading and (not special_ready) and (not kill_confirm)
 
         farm_obj: Optional[Tuple[List[float], List[float], str]] = None
-        if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0 and me["cubes"] < self.cube_stat_cap:
+        early_farm_window = (
+            t < 150.0
+            and obs["alive"] >= 7
+            and me["cubes"] < min(self.cube_stat_cap, 6)
+            and hp_frac > 0.60
+        )
+        distant_fight = (
+            target_mech is not None
+            and not kill_confirm
+            and d_target_2d > 100.0
+            and len(los_mechs) <= 1
+            and early_farm_window
+        )
+        if (
+            not zone_escape
+            and not zone_rotate
+            and (target_mech is None or distant_fight)
+            and len(los_mechs) <= 1
+            and me["cubes"] < min(self.cube_stat_cap, 6)
+        ):
             near_npc = min(vis_npcs, key=lambda n: horiz_dist(me["pos"], n["pos"]), default=None)
             near_crate = min(obs["crates"], key=lambda c: horiz_dist(me["pos"], c["pos"]), default=None)
             if near_npc and horiz_dist(me["pos"], near_npc["pos"]) < 95.0 and hp_frac > 0.58:
@@ -1386,7 +1405,7 @@ class Bot:
         elif loot_goal is not None and not kill_confirm and not (has_los_target and d_target_2d < 70.0 and loot_goal[2] != "CUBE"):
             goal_x, goal_y, mode = loot_goal
 
-        elif target_mech is not None:
+        elif target_mech is not None and not (distant_fight and farm_obj is not None):
             mode = "KILL" if kill_confirm else ("RELOAD" if reload_cover_dip else "FIGHT")
             e_weapons = set(target_mech.get("weapons", []))
 
