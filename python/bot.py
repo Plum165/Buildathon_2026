@@ -666,46 +666,80 @@ class Bot:
         self.stuck_score = 0.0
         self.unstuck_until = -1.0
 
+    # Upgrade thresholds from hello["config"]["cubes"]["upgrade_thresholds"]
+# (save in __init__: self.upgrade_thresholds = set(self.cfg["cubes"]["upgrade_thresholds"]))
+# (save in __init__: self.cube_stat_cap = int(self.cfg["cubes"].get("stat_cap", 10)))
+
     def _pick_upgrade(self, obs: mf.Observation) -> int:
         offer = obs["offer"]
         if not offer:
             return 0
-        held_kinds = {w["kind"] for w in obs["self"]["weapons"] if w is not None}
+        me = obs["self"]
+        held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
+        hp_frac = me["hp"] / max(1.0, me["max_hp"])
+
         best_i, best_score = 0, -1e9
         for idx, choice in enumerate(offer["choices"]):
             uid = choice["id"]
             udef = self.upgrades_def.get(uid)
-            score = 20.0
+            score = 10.0
+
             if udef:
                 req = udef.get("requires")
+                # Opportunity cost: penalize upgrades for temporary/unheld weapons
                 if req and req not in held_kinds:
-                    score -= 50.0
+                    score -= 60.0
+                elif req == "lightning" and ("laser" not in held_kinds and "mortar" not in held_kinds):
+                    # We plan to swap lightning for laser/mortar if found
+                    score -= 25.0
+
                 for eff in udef.get("effects", []):
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
+
+                    # S-Tier: Armor & Max HP (multiplicative EHP)
                     if "damage_mult" in path or "armor" in path:
-                        score += 115.0
-                    elif "regen_per_s" in path or "max_hp" in path or "regen_delay" in path:
+                        score += 130.0
+                    elif "max_hp" in path:
+                        score += 110.0
+                    elif "regen_delay" in path:
                         score += 100.0
+                    elif "regen_per_s" in path:
+                        score += 95.0 if hp_frac < 0.85 else 80.0
+                    # S-Tier: Primary gun DPS (zero opportunity cost)
                     elif req == "gun" or path.startswith("gun"):
-                        score += 95.0
-                    elif req in held_kinds or any(path.startswith(k) for k in held_kinds):
+                        score += 115.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 88.0
+                    # A-Tier: Mobility & Energy (survival + dodge)
+                    elif "walk_speed" in path or "boost_speed" in path:
+                        score += 98.0
+                    elif "energy" in path or "jet" in path:
+                        score += 85.0
+                    # A-Tier: Core special weapons (laser > mortar > lightning)
+                    elif req == "laser" or path.startswith("laser"):
+                        score += 102.0 if "charge" in path else 90.0
+                    elif req == "mortar" or path.startswith("mortar"):
                         score += 88.0
-                    elif "speed" in path or "energy" in path or "jet" in path:
-                        score += 82.0
+                    elif req == "lightning" or path.startswith("lightning"):
+                        score += 65.0
+                    # Situational: Sensors (better in Finals FFA, lower in Practice)
                     elif "near_range" in path or "bearing_noise" in path or "vision" in path:
-                        score += 75.0
+                        score += 68.0
                     elif "turn_rate" in path or "pitch_rate" in path:
                         score += 55.0
                     else:
                         score += abs(mul - 1.0) * 40.0 + abs(add) * 2.0
             else:
                 desc = (choice.get("name", "") + " " + choice.get("desc", "")).lower()
-                if "armor" in desc or "damage taken" in desc or "hp" in desc or "regen" in desc:
-                    score += 105.0
-                elif "gun" in desc or "fire rate" in desc or "speed" in desc:
+                if "armor" in desc or "damage taken" in desc:
+                    score += 130.0
+                elif "hp" in desc or "regen" in desc:
+                    score += 100.0
+                elif "gun" in desc or "fire rate" in desc:
+                    score += 110.0
+                elif "speed" in desc or "energy" in desc:
                     score += 90.0
+
             if score > best_score:
                 best_score, best_i = score, idx
         return best_i
@@ -915,6 +949,90 @@ class Bot:
                     urgent_boost = True
 
         return dodge_x, dodge_y, urgent_boost, urgent_jump
+    def _eval_loot_target(
+        self, obs: mf.Observation, cur_zc: List[float], cur_zr: float,
+        has_los_target: bool, d_target_2d: float,
+    ) -> Optional[Tuple[float, float, str]]:
+        """Returns (goal_x, goal_y, mode) for highest ROI loot, or None if risk > reward."""
+        me = obs["self"]
+        mx, my, _ = me["pos"]
+        hp_frac = me["hp"] / max(1.0, me["max_hp"])
+        cubes = int(me["cubes"])
+        nc = obs["zone"]["next_center"]
+        nr = max(8.0, float(obs["zone"]["next_radius"]))
+        held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
+        need_weapon = len(held_kinds) < 2
+        worst_prio = min((WEAPON_PRIORITY.get(k, 0) for k in held_kinds), default=0)
+
+        def risk_divisor(ix: float, iy: float, exposure_s: float) -> float:
+            d_me = math.hypot(ix - mx, iy - my)
+            # Abandon if near/outside active zone or closing next zone
+            if math.hypot(ix - cur_zc[0], iy - cur_zc[1]) > cur_zr - 12.0:
+                return 1e9
+            if obs["t"] >= obs["zone"]["shrink_start"] - 6.0 and math.hypot(ix - nc[0], iy - nc[1]) > nr * 0.92:
+                return 1e9
+            risk = 10.0 + d_me + exposure_s * 12.0
+            for th in self.threats.values():
+                d_th = math.hypot(ix - th["pos"][0], iy - th["pos"][1])
+                if d_th < d_me * 0.95 or d_th < 45.0:
+                    risk += 180.0
+                elif d_th < 85.0:
+                    risk += 55.0
+            if hp_frac < 0.65:
+                risk *= 1.5
+            return risk
+
+        best_goal: Optional[Tuple[float, float, str]] = None
+        best_roi = 0.0
+
+        # 1) Cubes (huge value <=10 or on upgrade threshold; avoid pointless hitbox bloat >10)
+        hits_upgrade = (cubes + 1) in self.upgrade_thresholds
+        cube_val = 140.0 if cubes < self.cube_stat_cap else (110.0 if hits_upgrade else 18.0)
+        if hits_upgrade and cubes < self.cube_stat_cap:
+            cube_val += 45.0
+        for c in obs["cubes"]:
+            cx, cy = c["pos"][0], c["pos"][1]
+            d = math.hypot(cx - mx, cy - my)
+            if has_los_target and d > 12.0:
+                continue
+            roi = cube_val / risk_divisor(cx, cy, 0.0)
+            if roi > best_roi:
+                best_roi = roi
+                best_goal = (cx, cy, "CUBE")
+
+        # 2) Weapon Pickups (only when not actively fighting)
+        if not has_los_target and d_target_2d > 55.0:
+            for p in obs["pickups"]:
+                kind = p["kind"]
+                if kind in held_kinds:
+                    continue
+                prio = WEAPON_PRIORITY.get(kind, 0)
+                if not need_weapon and prio <= worst_prio:
+                    continue
+                px, py = p["pos"][0], p["pos"][1]
+                reward = (190.0 if need_weapon else 110.0) + prio * 18.0
+                roi = reward / risk_divisor(px, py, 0.5)
+                if roi > best_roi:
+                    best_roi = roi
+                    best_goal = (px, py, "LOOT")
+
+        # 3) Supply Drops (only when uncontested, landing soon, and inside safe zone)
+        if not has_los_target and len(self.threats) == 0:
+            for dr in obs["drops"]:
+                dx, dy = dr["pos"][0], dr["pos"][1]
+                d = math.hypot(dx - mx, dy - my)
+                if dr["lands_in"] > 10.0 or d > 95.0:
+                    continue
+                if hp_frac < 0.72 and d > 55.0:
+                    continue
+                reward = 280.0 + (180.0 if hp_frac < 0.55 else 0.0)
+                roi = reward / risk_divisor(dx, dy, float(dr["capture_s"]))
+                if roi > best_roi:
+                    best_roi = roi
+                    best_goal = (dx, dy, "DROP")
+
+        # Minimum ROI threshold: abandon low-value / high-risk loot
+        return best_goal if best_roi >= 1.35 else None
 
     def _find_cover_pos(self, obs: mf.Observation) -> Tuple[float, float]:
         t = obs["t"]
