@@ -1,4 +1,4 @@
-"""Midrange (50m) high-DPS duelist built directly on v9 (4.22) for mechfight/1."""
+"""Balanced offense + active defense (v9 4.22 core + reload cover-dip & strafe-boost) for mechfight/1."""
 from __future__ import annotations
 
 import array
@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "midrange-v13"
+    name = "hybrid-v14"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -734,6 +734,7 @@ class Bot:
         self.direct_hit_by_t: Dict[int, float] = {}
         self.recent_sounds: List[Tuple[float, float, str]] = []
         self.strafe_dir = 1 if self.rng.random() < 0.5 else -1
+        self.last_flip_t = 0.0
         self.next_strafe_flip_t = 0.0
 
         self.cached_goal: Optional[Tuple[float, float]] = None
@@ -768,25 +769,25 @@ class Bot:
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
-                    # Pure midrange offense + armor balance: gun > laser > armor > speed > max_hp
+                    # Balanced offense + defense: gun > armor > laser > max_hp > speed
                     if req == "gun" or path.startswith("gun"):
-                        score += 136.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 98.0
-                    elif req == "laser" or path.startswith("laser"):
-                        score += 128.0 if "charge" in path else 112.0
+                        score += 132.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 96.0
                     elif "damage_mult" in path or "armor" in path:
-                        score += 122.0
-                    elif "walk_speed" in path or "boost_speed" in path:
-                        score += 112.0
+                        score += 128.0
+                    elif req == "laser" or path.startswith("laser"):
+                        score += 118.0 if "charge" in path else 104.0
                     elif "max_hp" in path:
-                        score += 106.0
+                        score += 115.0
+                    elif "walk_speed" in path or "boost_speed" in path:
+                        score += 105.0
                     elif req == "mortar" or path.startswith("mortar"):
                         score += 98.0
                     elif "regen_delay" in path or "regen_per_s" in path:
-                        score += 86.0
+                        score += 92.0
                     elif "energy" in path or "jet" in path:
-                        score += 84.0
+                        score += 86.0
                     elif req == "lightning" or path.startswith("lightning"):
-                        score += 65.0
+                        score += 68.0
                     elif "near_range" in path or "bearing_noise" in path or "vision" in path:
                         score += 65.0
                     elif "turn_rate" in path or "pitch_rate" in path:
@@ -796,12 +797,10 @@ class Bot:
             else:
                 desc = (choice.get("name", "") + " " + choice.get("desc", "")).lower()
                 if "gun" in desc or "fire rate" in desc:
-                    score += 135.0
-                elif "laser" in desc:
-                    score += 126.0
+                    score += 130.0
                 elif "armor" in desc or "damage taken" in desc:
-                    score += 122.0
-                elif "speed" in desc or "hp" in desc:
+                    score += 126.0
+                elif "hp" in desc or "speed" in desc:
                     score += 108.0
             if score > best_score:
                 best_score, best_i = score, idx
@@ -1157,7 +1156,7 @@ class Bot:
     def _local_fight_move(
         self, obs: mf.Observation, target_mech: Dict[str, Any],
         los_mechs: List[Dict[str, Any]], desired_dist: float,
-        peek_cover: bool, cur_zc: List[float], cur_zr: float, t_wall0: float,
+        peek_cover: bool, reload_hide: bool, cur_zc: List[float], cur_zr: float, t_wall0: float,
     ) -> Tuple[float, float]:
         me = obs["self"]
         mx, my, _ = me["pos"]
@@ -1189,7 +1188,7 @@ class Bot:
 
         best_dx, best_dy = math.cos(tang_pref), math.sin(tang_pref)
         best_score = -1e9
-        do_iso_los = (t2_eye is not None) and ((time.perf_counter() - t_wall0) < 0.010)
+        do_iso_los = (t2_eye is not None or reload_hide) and ((time.perf_counter() - t_wall0) < 0.011)
 
         for k in range(16):
             ang = k * (math.pi / 8.0)
@@ -1212,18 +1211,21 @@ class Bot:
                 d2_old = math.hypot(mx - other_threat["pos"][0], my - other_threat["pos"][1])
                 score += (d2_new - d2_old) * 2.0
 
-            if do_iso_los and (k % 4 == 0) and (time.perf_counter() - t_wall0) < 0.014:
+            if do_iso_los and (k % 4 == 0) and (time.perf_counter() - t_wall0) < 0.015:
                 cz = self.world.terrain_z(nx_p, ny_p)
                 c_eye = [nx_p, ny_p, cz + eye_h]
                 see_t1 = self.world.has_los(c_eye, t1_eye)
-                see_t2 = self.world.has_los(c_eye, t2_eye)  # type: ignore[arg-type]
-                if see_t1 and not see_t2:
-                    score += 32.0
-                elif see_t1 and see_t2:
-                    score -= 22.0
+                if reload_hide and not see_t1:
+                    score += 30.0
+                if t2_eye is not None:
+                    see_t2 = self.world.has_los(c_eye, t2_eye)
+                    if see_t1 and not see_t2:
+                        score += 34.0
+                    elif see_t1 and see_t2:
+                        score -= 22.0
 
             if peek_cover and self.world.has_near_tall_wall(nx_p, ny_p):
-                score += 8.0
+                score += 10.0
             if math.hypot(nx_p - nc[0], ny_p - nc[1]) > nr * 0.88:
                 score -= 14.0
             if self.world.point_near_wall(mx + 14.0 * ux, my + 14.0 * uy, 2.4):
@@ -1235,6 +1237,7 @@ class Bot:
 
         if self.world.point_near_wall(mx + 6.0 * math.cos(tang_pref), my + 6.0 * math.sin(tang_pref), 2.6):
             self.strafe_dir *= -1
+            self.last_flip_t = obs["t"]
 
         return best_dx, best_dy
 
@@ -1265,10 +1268,12 @@ class Bot:
                 self.unstuck_until = t + 0.55
                 self.stuck_score = 0.0
                 self.strafe_dir *= -1
+                self.last_flip_t = t
         self.last_pos = [mx, my, mz]
 
         if t >= self.next_strafe_flip_t:
             self.strafe_dir *= -1
+            self.last_flip_t = t
             self.next_strafe_flip_t = t + self.rng.uniform(1.00, 1.35)
 
         act: mf.Action = {"tick": obs["tick"]}
@@ -1329,7 +1334,12 @@ class Bot:
         need_retreat = outnumbered or losing_duel
 
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
-        gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.25 for w in me["weapons"])
+        gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.30 for w in me["weapons"])
+        special_ready = any(
+            w and w["kind"] != "gun" and (float(w.get("cooldown", 0.0)) <= 0.25 or float(w.get("charge", 0.0)) > 0.0)
+            for w in me["weapons"]
+        )
+        reload_cover_dip = gun_reloading and (not special_ready) and (not kill_confirm)
 
         farm_obj: Optional[Tuple[List[float], List[float], str]] = None
         if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0 and me["cubes"] < self.cube_stat_cap:
@@ -1372,32 +1382,34 @@ class Bot:
             goal_x, goal_y, mode = loot_goal
 
         elif target_mech is not None:
-            mode = "KILL" if kill_confirm else "FIGHT"
+            mode = "KILL" if kill_confirm else ("RELOAD" if reload_cover_dip else "FIGHT")
             e_weapons = set(target_mech.get("weapons", []))
 
-            # Midrange sweet spot: 50m (outranges 45m lightning, high gun/laser accuracy + bullet dodge)
-            desired_dist = 58.0 if len(los_mechs) >= 2 else 50.0
+            # v9 sweet-spot range (40m 1v1, 54m 2v1/reload-dip, 32m kill-confirm)
+            desired_dist = 54.0 if (len(los_mechs) >= 2 or reload_cover_dip) else 40.0
             if kill_confirm:
-                desired_dist = 38.0
-                if (not has_los_target or d_target_2d > 52.0) and energy > 45.0:
+                desired_dist = 32.0
+                if (not has_los_target or d_target_2d > 45.0) and energy > 45.0:
                     want_boost = True
             elif "lightning" in e_weapons and "lightning" not in held_kinds:
-                desired_dist = 62.0
+                desired_dist = 72.0
             elif "lightning" in held_kinds and target_mech.get("charging") and energy > 38.0 and d_target_2d < 65.0:
-                desired_dist = 34.0
+                desired_dist = 32.0
             elif "mortar" in held_kinds and "laser" not in held_kinds and not has_los_target:
-                desired_dist = 78.0
+                desired_dist = 80.0
 
-            if has_los_target or d_target_2d < 75.0:
+            if has_los_target or d_target_2d < 70.0:
                 use_local_fight_move = True
                 move_x, move_y = self._local_fight_move(
                     obs, target_mech, los_mechs, desired_dist,
-                    gun_reloading or hp_frac < 0.48, cur_zc, cur_zr, t_wall0,
+                    reload_cover_dip or hp_frac < 0.48, reload_cover_dip,
+                    cur_zc, cur_zr, t_wall0,
                 )
             else:
                 goal_x, goal_y = target_mech["pos"][0], target_mech["pos"][1]
 
-            if has_los_target and energy > 82.0 and (obs["tick"] % 10 < 2):
+            # Strafe-flip boost burst (breaks enemy lead right on direction change, reserves >=40 energy)
+            if has_los_target and energy > 65.0 and ((t - self.last_flip_t) < 0.25 or reload_cover_dip):
                 want_boost = True
 
         elif farm_obj is not None:
@@ -1405,7 +1417,7 @@ class Bot:
             fx, fy, _ = farm_obj[0]
             ang_from_f = math.atan2(my - fy, mx - fx)
             tang = ang_from_f + self.strafe_dir * 0.65
-            dist_f = 32.0 if farm_obj[2] == "npc" else 20.0
+            dist_f = 28.0 if farm_obj[2] == "npc" else 18.0
             goal_x, goal_y = fx + dist_f * math.cos(tang), fy + dist_f * math.sin(tang)
 
         else:
@@ -1514,7 +1526,6 @@ class Bot:
                 mortar_sol: Optional[Tuple[float, float]] = None
                 gun_ready = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) <= 0.10 and w.get("ammo", 0) > 0 for w in me["weapons"])
 
-                # Snap torso to laser only in final 0.14s of charge so gun gets extra shots!
                 for idx, w in enumerate(me["weapons"]):
                     if w and w["kind"] == "laser":
                         l_range = float(w["stats"].get("range", 280.0))
@@ -1526,7 +1537,7 @@ class Bot:
                         if "mortar" in target_mech.get("weapons", []):
                             dmg_full *= 1.6
                         est_dmg = dmg_full * (min_frac + (1.0 - min_frac) * clamp(ch / max(0.01, full_c), 0.0, 1.0))
-                        snap_now = (ch >= full_c - 0.14) or (ch >= min_c and est_dmg >= target_hp * 1.02)
+                        snap_now = (ch >= full_c - 0.24) or (ch >= min_c and est_dmg >= target_hp * 1.02)
                         if (ch > 0.0 and (snap_now or not gun_ready)) and d_to_target <= l_range:
                             aim_owner = idx
                             break
@@ -1534,7 +1545,7 @@ class Bot:
                 if aim_owner is None:
                     for idx, w in enumerate(me["weapons"]):
                         if w and w["kind"] == "mortar" and float(w["cooldown"]) <= 0.10:
-                            if (not has_los_target or gun_reloading or d_to_target >= 50.0) and (time.perf_counter() - t_wall0) < 0.020:
+                            if (not has_los_target or gun_reloading or d_to_target >= 55.0) and (time.perf_counter() - t_wall0) < 0.020:
                                 t_acc = float(self.threats.get(int(target_mech["id"]), {}).get("accel", 0.0))
                                 mortar_sol = solve_mortar_aim(
                                     my_mortar_muzzle, t_pos, t_vel,
