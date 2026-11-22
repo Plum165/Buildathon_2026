@@ -1,4 +1,4 @@
-"""Evasive duel + smart farming & zone bot for mechfight/1 (standard library only)."""
+"""Tactical-steering, corner-peeking & risk-adjusted loot/upgrade bot for mechfight/1."""
 from __future__ import annotations
 
 import array
@@ -158,6 +158,7 @@ class WorldMap:
         self.nav_min_x = 0.0
         self.nav_min_y = 0.0
         self.nav_blocked = bytearray()
+        self.nav_tall_wall = bytearray()
         self.nav_penalty: List[float] = []
 
         world_path = os.path.join(map_dir, "v2", "world.json")
@@ -231,6 +232,7 @@ class WorldMap:
         self.nav_ny = int((self.bounds["maxY"] - self.nav_min_y) / self.nav_step) + 1
         total = self.nav_nx * self.nav_ny
         blocked = bytearray(total)
+        tall_wall = bytearray(total)
 
         nx, ny = self.nav_nx, self.nav_ny
         min_x, min_y, s = self.nav_min_x, self.nav_min_y, self.nav_step
@@ -265,21 +267,26 @@ class WorldMap:
                 y = min_y + (gy + 0.5) * s
                 row = gy * nx
                 for gx in range(gx0, gx1 + 1):
-                    if blocked[row + gx]:
-                        continue
                     x = min_x + (gx + 0.5) * s
                     tz = self.terrain_z(x, y)
                     if (p.base - tz) >= mech_h or (p.top - tz) <= step_up:
                         continue
+                    is_tall = (p.top - tz) >= 8.5
                     if _point_in_prism_2d(x, y, p):
                         blocked[row + gx] = 1
+                        if is_tall:
+                            tall_wall[row + gx] = 1
                         continue
-                    for ax, ay, bx, by in p.edges:
-                        if _dist_point_to_seg_sq(x, y, ax, ay, bx, by) < clear_r_sq:
-                            blocked[row + gx] = 1
-                            break
+                    if not blocked[row + gx]:
+                        for ax, ay, bx, by in p.edges:
+                            if _dist_point_to_seg_sq(x, y, ax, ay, bx, by) < clear_r_sq:
+                                blocked[row + gx] = 1
+                                if is_tall:
+                                    tall_wall[row + gx] = 1
+                                break
 
         self.nav_blocked = blocked
+        self.nav_tall_wall = tall_wall
 
         dist = [-1] * total
         q: List[int] = []
@@ -330,6 +337,21 @@ class WorldMap:
             return False
         gx, gy = self.world_to_grid(x, y)
         return bool(self.nav_blocked[gy * self.nav_nx + gx])
+
+    def has_near_tall_wall(self, x: float, y: float) -> bool:
+        if not self.loaded:
+            return False
+        gx, gy = self.world_to_grid(x, y)
+        nx, ny = self.nav_nx, self.nav_ny
+        for dy in (-2, -1, 0, 1, 2):
+            yy = gy + dy
+            if 0 <= yy < ny:
+                row = yy * nx
+                for dx in (-2, -1, 0, 1, 2):
+                    xx = gx + dx
+                    if 0 <= xx < nx and self.nav_tall_wall[row + xx]:
+                        return True
+        return False
 
     def _grid_line_clear(self, x0: float, y0: float, x1: float, y1: float) -> bool:
         d = math.hypot(x1 - x0, y1 - y0)
@@ -632,7 +654,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "survivor-v4"
+    name = "survivor-v5"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -643,6 +665,8 @@ class Bot:
         self.min_pitch = float(self.mech_cfg.get("min_pitch", -1.2))
         self.max_pitch = float(self.mech_cfg.get("max_pitch", 1.2))
         self.size_per_cube = float(self.cfg.get("cubes", {}).get("size_per_cube", 0.05))
+        self.cube_stat_cap = int(self.cfg.get("cubes", {}).get("stat_cap", 10))
+        self.upgrade_thresholds = set(self.cfg.get("cubes", {}).get("upgrade_thresholds", [1, 3, 6, 10, 15, 21]))
         self.upgrades_def: Dict[str, Dict[str, Any]] = {
             u["id"]: u for u in self.cfg.get("upgrades", [])
         }
@@ -666,10 +690,6 @@ class Bot:
         self.stuck_score = 0.0
         self.unstuck_until = -1.0
 
-    # Upgrade thresholds from hello["config"]["cubes"]["upgrade_thresholds"]
-# (save in __init__: self.upgrade_thresholds = set(self.cfg["cubes"]["upgrade_thresholds"]))
-# (save in __init__: self.cube_stat_cap = int(self.cfg["cubes"].get("stat_cap", 10)))
-
     def _pick_upgrade(self, obs: mf.Observation) -> int:
         offer = obs["offer"]
         if not offer:
@@ -683,22 +703,17 @@ class Bot:
             uid = choice["id"]
             udef = self.upgrades_def.get(uid)
             score = 10.0
-
             if udef:
                 req = udef.get("requires")
-                # Opportunity cost: penalize upgrades for temporary/unheld weapons
                 if req and req not in held_kinds:
                     score -= 60.0
                 elif req == "lightning" and ("laser" not in held_kinds and "mortar" not in held_kinds):
-                    # We plan to swap lightning for laser/mortar if found
                     score -= 25.0
 
                 for eff in udef.get("effects", []):
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
-
-                    # S-Tier: Armor & Max HP (multiplicative EHP)
                     if "damage_mult" in path or "armor" in path:
                         score += 130.0
                     elif "max_hp" in path:
@@ -707,22 +722,18 @@ class Bot:
                         score += 100.0
                     elif "regen_per_s" in path:
                         score += 95.0 if hp_frac < 0.85 else 80.0
-                    # S-Tier: Primary gun DPS (zero opportunity cost)
                     elif req == "gun" or path.startswith("gun"):
                         score += 115.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 88.0
-                    # A-Tier: Mobility & Energy (survival + dodge)
                     elif "walk_speed" in path or "boost_speed" in path:
                         score += 98.0
                     elif "energy" in path or "jet" in path:
                         score += 85.0
-                    # A-Tier: Core special weapons (laser > mortar > lightning)
                     elif req == "laser" or path.startswith("laser"):
                         score += 102.0 if "charge" in path else 90.0
                     elif req == "mortar" or path.startswith("mortar"):
                         score += 88.0
                     elif req == "lightning" or path.startswith("lightning"):
                         score += 65.0
-                    # Situational: Sensors (better in Finals FFA, lower in Practice)
                     elif "near_range" in path or "bearing_noise" in path or "vision" in path:
                         score += 68.0
                     elif "turn_rate" in path or "pitch_rate" in path:
@@ -739,7 +750,6 @@ class Bot:
                     score += 110.0
                 elif "speed" in desc or "energy" in desc:
                     score += 90.0
-
             if score > best_score:
                 best_score, best_i = score, idx
         return best_i
@@ -949,90 +959,6 @@ class Bot:
                     urgent_boost = True
 
         return dodge_x, dodge_y, urgent_boost, urgent_jump
-    def _eval_loot_target(
-        self, obs: mf.Observation, cur_zc: List[float], cur_zr: float,
-        has_los_target: bool, d_target_2d: float,
-    ) -> Optional[Tuple[float, float, str]]:
-        """Returns (goal_x, goal_y, mode) for highest ROI loot, or None if risk > reward."""
-        me = obs["self"]
-        mx, my, _ = me["pos"]
-        hp_frac = me["hp"] / max(1.0, me["max_hp"])
-        cubes = int(me["cubes"])
-        nc = obs["zone"]["next_center"]
-        nr = max(8.0, float(obs["zone"]["next_radius"]))
-        held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
-        need_weapon = len(held_kinds) < 2
-        worst_prio = min((WEAPON_PRIORITY.get(k, 0) for k in held_kinds), default=0)
-
-        def risk_divisor(ix: float, iy: float, exposure_s: float) -> float:
-            d_me = math.hypot(ix - mx, iy - my)
-            # Abandon if near/outside active zone or closing next zone
-            if math.hypot(ix - cur_zc[0], iy - cur_zc[1]) > cur_zr - 12.0:
-                return 1e9
-            if obs["t"] >= obs["zone"]["shrink_start"] - 6.0 and math.hypot(ix - nc[0], iy - nc[1]) > nr * 0.92:
-                return 1e9
-            risk = 10.0 + d_me + exposure_s * 12.0
-            for th in self.threats.values():
-                d_th = math.hypot(ix - th["pos"][0], iy - th["pos"][1])
-                if d_th < d_me * 0.95 or d_th < 45.0:
-                    risk += 180.0
-                elif d_th < 85.0:
-                    risk += 55.0
-            if hp_frac < 0.65:
-                risk *= 1.5
-            return risk
-
-        best_goal: Optional[Tuple[float, float, str]] = None
-        best_roi = 0.0
-
-        # 1) Cubes (huge value <=10 or on upgrade threshold; avoid pointless hitbox bloat >10)
-        hits_upgrade = (cubes + 1) in self.upgrade_thresholds
-        cube_val = 140.0 if cubes < self.cube_stat_cap else (110.0 if hits_upgrade else 18.0)
-        if hits_upgrade and cubes < self.cube_stat_cap:
-            cube_val += 45.0
-        for c in obs["cubes"]:
-            cx, cy = c["pos"][0], c["pos"][1]
-            d = math.hypot(cx - mx, cy - my)
-            if has_los_target and d > 12.0:
-                continue
-            roi = cube_val / risk_divisor(cx, cy, 0.0)
-            if roi > best_roi:
-                best_roi = roi
-                best_goal = (cx, cy, "CUBE")
-
-        # 2) Weapon Pickups (only when not actively fighting)
-        if not has_los_target and d_target_2d > 55.0:
-            for p in obs["pickups"]:
-                kind = p["kind"]
-                if kind in held_kinds:
-                    continue
-                prio = WEAPON_PRIORITY.get(kind, 0)
-                if not need_weapon and prio <= worst_prio:
-                    continue
-                px, py = p["pos"][0], p["pos"][1]
-                reward = (190.0 if need_weapon else 110.0) + prio * 18.0
-                roi = reward / risk_divisor(px, py, 0.5)
-                if roi > best_roi:
-                    best_roi = roi
-                    best_goal = (px, py, "LOOT")
-
-        # 3) Supply Drops (only when uncontested, landing soon, and inside safe zone)
-        if not has_los_target and len(self.threats) == 0:
-            for dr in obs["drops"]:
-                dx, dy = dr["pos"][0], dr["pos"][1]
-                d = math.hypot(dx - mx, dy - my)
-                if dr["lands_in"] > 10.0 or d > 95.0:
-                    continue
-                if hp_frac < 0.72 and d > 55.0:
-                    continue
-                reward = 280.0 + (180.0 if hp_frac < 0.55 else 0.0)
-                roi = reward / risk_divisor(dx, dy, float(dr["capture_s"]))
-                if roi > best_roi:
-                    best_roi = roi
-                    best_goal = (dx, dy, "DROP")
-
-        # Minimum ROI threshold: abandon low-value / high-risk loot
-        return best_goal if best_roi >= 1.35 else None
 
     def _find_cover_pos(self, obs: mf.Observation) -> Tuple[float, float]:
         t = obs["t"]
@@ -1101,6 +1027,154 @@ class Bot:
             or self.world.has_los(my_eye, [mp[0], mp[1], mp[2] + 8.2 * t_scale])
         )
 
+    def _eval_loot_target(
+        self, obs: mf.Observation, cur_zc: List[float], cur_zr: float,
+        has_los_target: bool, d_target_2d: float,
+    ) -> Optional[Tuple[float, float, str]]:
+        me = obs["self"]
+        mx, my, _ = me["pos"]
+        hp_frac = me["hp"] / max(1.0, me["max_hp"])
+        cubes = int(me["cubes"])
+        nc = obs["zone"]["next_center"]
+        nr = max(8.0, float(obs["zone"]["next_radius"]))
+        held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
+        need_weapon = len(held_kinds) < 2
+        worst_prio = min((WEAPON_PRIORITY.get(k, 0) for k in held_kinds), default=0)
+
+        def risk_divisor(ix: float, iy: float, exposure_s: float) -> float:
+            d_me = math.hypot(ix - mx, iy - my)
+            if math.hypot(ix - cur_zc[0], iy - cur_zc[1]) > cur_zr - 12.0:
+                return 1e9
+            if obs["t"] >= obs["zone"]["shrink_start"] - 6.0 and math.hypot(ix - nc[0], iy - nc[1]) > nr * 0.92:
+                return 1e9
+            risk = 10.0 + d_me + exposure_s * 12.0
+            for th in self.threats.values():
+                d_th = math.hypot(ix - th["pos"][0], iy - th["pos"][1])
+                if d_th < d_me * 0.95 or d_th < 45.0:
+                    risk += 180.0
+                elif d_th < 85.0:
+                    risk += 55.0
+            if hp_frac < 0.65:
+                risk *= 1.5
+            return risk
+
+        best_goal: Optional[Tuple[float, float, str]] = None
+        best_roi = 0.0
+
+        hits_upgrade = (cubes + 1) in self.upgrade_thresholds
+        cube_val = 140.0 if cubes < self.cube_stat_cap else (110.0 if hits_upgrade else 18.0)
+        if hits_upgrade and cubes < self.cube_stat_cap:
+            cube_val += 45.0
+        for c in obs["cubes"]:
+            cx, cy = c["pos"][0], c["pos"][1]
+            d = math.hypot(cx - mx, cy - my)
+            if has_los_target and d > 12.0:
+                continue
+            roi = cube_val / risk_divisor(cx, cy, 0.0)
+            if roi > best_roi:
+                best_roi = roi
+                best_goal = (cx, cy, "CUBE")
+
+        if not has_los_target and d_target_2d > 55.0:
+            for p in obs["pickups"]:
+                kind = p["kind"]
+                if kind in held_kinds:
+                    continue
+                prio = WEAPON_PRIORITY.get(kind, 0)
+                if not need_weapon and prio <= worst_prio:
+                    continue
+                px, py = p["pos"][0], p["pos"][1]
+                reward = (190.0 if need_weapon else 110.0) + prio * 18.0
+                roi = reward / risk_divisor(px, py, 0.5)
+                if roi > best_roi:
+                    best_roi = roi
+                    best_goal = (px, py, "LOOT")
+
+        if not has_los_target and len(self.threats) == 0:
+            for dr in obs["drops"]:
+                dx, dy = dr["pos"][0], dr["pos"][1]
+                d = math.hypot(dx - mx, dy - my)
+                if dr["lands_in"] > 10.0 or d > 95.0:
+                    continue
+                if hp_frac < 0.72 and d > 55.0:
+                    continue
+                reward = 280.0 + (180.0 if hp_frac < 0.55 else 0.0)
+                roi = reward / risk_divisor(dx, dy, float(dr["capture_s"]))
+                if roi > best_roi:
+                    best_roi = roi
+                    best_goal = (dx, dy, "DROP")
+
+        return best_goal if best_roi >= 1.35 else None
+
+    def _local_fight_move(
+        self, obs: mf.Observation, target_mech: Dict[str, Any],
+        los_mechs: List[Dict[str, Any]], desired_dist: float,
+        peek_cover: bool, cur_zc: List[float], cur_zr: float,
+    ) -> Tuple[float, float]:
+        """16-direction tactical steering: avoids walls, crossfire, and rear hits while strafing."""
+        me = obs["self"]
+        mx, my, _ = me["pos"]
+        tx, ty, _ = target_mech["pos"]
+        nc = obs["zone"]["next_center"]
+        nr = max(8.0, float(obs["zone"]["next_radius"]))
+        d_now = math.hypot(mx - tx, my - ty)
+        ang_from_e = math.atan2(my - ty, mx - tx)
+        tang_pref = ang_from_e + self.strafe_dir * 1.57
+
+        # Multi-enemy centroid (push away from flanking angle to keep enemies on one side)
+        multi_threats = [m for m in los_mechs if m["id"] != target_mech["id"]]
+
+        best_dx, best_dy = math.cos(tang_pref), math.sin(tang_pref)
+        best_score = -1e9
+        for k in range(16):
+            ang = k * (math.pi / 8.0)
+            ux, uy = math.cos(ang), math.sin(ang)
+            if self.world.is_blocked(mx + 4.0 * ux, my + 4.0 * uy):
+                continue
+            nx_p, ny_p = mx + 9.0 * ux, my + 9.0 * uy
+            if self.world.is_blocked(nx_p, ny_p):
+                continue
+
+            # Stay inside active zone
+            if math.hypot(nx_p - cur_zc[0], ny_p - cur_zc[1]) > cur_zr - 9.0:
+                continue
+
+            score = 0.0
+            # 1) Maintain optimal kiting distance
+            d_new = math.hypot(nx_p - tx, ny_p - ty)
+            score -= abs(d_new - desired_dist) * 1.1
+
+            # 2) Strong tangential strafe alignment (breaks lead prediction)
+            score += (ux * math.cos(tang_pref) + uy * math.sin(tang_pref)) * 18.0
+
+            # 3) Anti-crossfire: keep secondary enemies on the same side, don't walk between two
+            for m2 in multi_threats:
+                d2_new = math.hypot(nx_p - m2["pos"][0], ny_p - m2["pos"][1])
+                d2_old = math.hypot(mx - m2["pos"][0], my - m2["pos"][1])
+                score += (d2_new - d2_old) * 2.2
+
+            # 4) Reload / hurt corner-cover bias
+            if peek_cover and self.world.has_near_tall_wall(nx_p, ny_p):
+                score += 10.0
+
+            # 5) Gentle pull inside next_radius
+            if math.hypot(nx_p - nc[0], ny_p - nc[1]) > nr * 0.88:
+                score -= 14.0
+
+            # 6) Check 14m lookahead so we don't steer into a dead-end wall
+            if self.world.is_blocked(mx + 14.0 * ux, my + 14.0 * uy):
+                score -= 12.0
+
+            if score > best_score:
+                best_score = score
+                best_dx, best_dy = ux, uy
+
+        # If our preferred strafe side is blocked, flip strafe_dir
+        if self.world.is_blocked(mx + 6.5 * math.cos(tang_pref), my + 6.5 * math.sin(tang_pref)):
+            self.strafe_dir *= -1
+
+        return best_dx, best_dy
+
     def act(self, obs: mf.Observation) -> mf.Action:
         t_wall0 = time.perf_counter()
         t = obs["t"]
@@ -1127,10 +1201,10 @@ class Bot:
                 self.strafe_dir *= -1
         self.last_pos = [mx, my, mz]
 
-        # Fast, unpredictable juke timing (0.45 - 0.70 s)
+        # Proper 1.05 - 1.40 s strafe legs (ground_accel takes 0.40s to reverse!)
         if t >= self.next_strafe_flip_t:
             self.strafe_dir *= -1
-            self.next_strafe_flip_t = t + self.rng.uniform(0.45, 0.72)
+            self.next_strafe_flip_t = t + self.rng.uniform(1.05, 1.40)
 
         act: mf.Action = {"tick": obs["tick"]}
 
@@ -1143,7 +1217,6 @@ class Bot:
 
         rear_bearing = self._update_awareness(obs)
 
-        # Predictive zone timing
         cur_zc, cur_zr = self._zone_circle(obs)
         z_obs = obs["zone"]
         nc, nr = z_obs["next_center"], max(6.0, float(z_obs["next_radius"]))
@@ -1165,7 +1238,6 @@ class Bot:
 
         vis_mechs = [m for m in obs["mechs"] if m["kind"] == "mech"]
         vis_npcs = [m for m in obs["mechs"] if m["kind"] == "npc"]
-
         los_mechs: List[Dict[str, Any]] = [m for m in vis_mechs if self._has_mech_los(my_eye, m)]
 
         target_mech: Optional[Dict[str, Any]] = None
@@ -1180,7 +1252,6 @@ class Bot:
         has_los_target = target_mech is not None and (target_mech in los_mechs)
         d_target_2d = horiz_dist(me["pos"], target_mech["pos"]) if target_mech else 999.0
 
-        # Only retreat if genuinely outnumbered in LOS or critically losing a duel
         outnumbered = len(los_mechs) >= 2 and hp_frac < 0.75
         finishable = target_mech is not None and float(target_mech.get("hp", 1400.0)) < 220.0 and hp > 240.0
         losing_duel = (
@@ -1191,35 +1262,31 @@ class Bot:
         )
         need_retreat = outnumbered or losing_duel
 
-        # --- Survival + Combat Goal Selection ------------------------------
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
-        need_weapon = len(held_kinds) < 2
-        worst_prio = min((WEAPON_PRIORITY.get(k, 0) for k in held_kinds), default=0)
+        gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.25 for w in me["weapons"])
 
-        goal_x, goal_y = self._safe_anchor(obs)
-        want_boost = False
-        mode = "PATROL"
-
-        best_cube = min(obs["cubes"], key=lambda c: horiz_dist(me["pos"], c["pos"]), default=None)
-        avail_pickups = [
-            p for p in obs["pickups"]
-            if p["kind"] not in held_kinds and (need_weapon or WEAPON_PRIORITY.get(p["kind"], 0) > worst_prio)
-        ]
-        best_pickup = min(avail_pickups, key=lambda p: horiz_dist(me["pos"], p["pos"]), default=None)
-
-        # Pre-check safe NPC/crate for early cube snowballing
+        # Pre-check safe NPC/crate for early cube snowballing (only when <=10 cubes or <2 weapons)
         farm_obj: Optional[Tuple[List[float], List[float], str]] = None
-        if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0:
+        if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0 and me["cubes"] < self.cube_stat_cap:
             near_npc = min(vis_npcs, key=lambda n: horiz_dist(me["pos"], n["pos"]), default=None)
             near_crate = min(obs["crates"], key=lambda c: horiz_dist(me["pos"], c["pos"]), default=None)
             if near_npc and horiz_dist(me["pos"], near_npc["pos"]) < 75.0 and hp_frac > 0.72:
                 np_p = near_npc["pos"]
                 if self.world.has_los(my_eye, [np_p[0], np_p[1], np_p[2] + 1.75]):
                     farm_obj = ([np_p[0], np_p[1], np_p[2] + 1.75], list(near_npc["vel"]), "npc")
-            elif near_crate and horiz_dist(me["pos"], near_crate["pos"]) < 65.0 and hp_frac > 0.75:
+            elif near_crate and horiz_dist(me["pos"], near_crate["pos"]) < 65.0 and hp_frac > 0.76:
                 cp = near_crate["pos"]
                 if self.world.has_los(my_eye, [cp[0], cp[1], cp[2] + 1.0]):
                     farm_obj = ([cp[0], cp[1], cp[2] + 1.0], [0.0, 0.0, 0.0], "crate")
+
+        goal_x, goal_y = self._safe_anchor(obs)
+        want_boost = False
+        mode = "PATROL"
+        use_local_fight_move = False
+
+        loot_goal = None
+        if not zone_escape and not need_retreat and not zone_rotate:
+            loot_goal = self._eval_loot_target(obs, cur_zc, cur_zr, has_los_target, d_target_2d)
 
         if zone_escape:
             mode = "ZONE_ESC"
@@ -1236,85 +1303,73 @@ class Bot:
             mode = "ROTATE"
             goal_x, goal_y = self._safe_anchor(obs)
 
-        elif best_cube and horiz_dist(me["pos"], best_cube["pos"]) < (12.0 if has_los_target else 65.0):
-            # Grab very close cubes anytime, or medium-range cubes when not in a LOS firefight
-            mode = "CUBE"
-            goal_x, goal_y = best_cube["pos"][0], best_cube["pos"][1]
-
-        elif best_pickup and horiz_dist(me["pos"], best_pickup["pos"]) < 70.0 and len(los_mechs) == 0 and d_target_2d > 55.0:
-            mode = "LOOT"
-            goal_x, goal_y = best_pickup["pos"][0], best_pickup["pos"][1]
+        elif loot_goal is not None and not (has_los_target and d_target_2d < 70.0 and loot_goal[2] != "CUBE"):
+            goal_x, goal_y, mode = loot_goal
 
         elif target_mech is not None:
             mode = "FIGHT"
-            tx, ty, _ = target_mech["pos"]
             e_weapons = set(target_mech.get("weapons", []))
-
-            # Keep optimal evasive kiting range (75-95m vs gun/lightning, 32m if rushing laser with lightning)
-            desired_dist = 82.0
+            desired_dist = 58.0
             if "lightning" in e_weapons and "lightning" not in held_kinds:
-                desired_dist = 92.0
-            elif "lightning" in held_kinds and (target_mech.get("charging") or "laser" in e_weapons) and energy > 45.0 and hp_frac > 0.65 and d_target_2d < 70.0:
+                desired_dist = 78.0
+            elif "lightning" in held_kinds and (target_mech.get("charging") or "laser" in e_weapons) and energy > 45.0 and hp_frac > 0.65 and d_target_2d < 65.0:
                 desired_dist = 30.0
             elif "mortar" in held_kinds and "laser" not in held_kinds and not has_los_target:
-                desired_dist = 100.0
+                desired_dist = 90.0
 
-            ang_from_e = math.atan2(my - ty, mx - tx)
-            perp_ang = ang_from_e + self.strafe_dir * 1.57
-            if self.world.is_blocked(mx + 7.0 * math.cos(perp_ang), my + 7.0 * math.sin(perp_ang)):
-                self.strafe_dir *= -1
-            tang_ang = ang_from_e + self.strafe_dir * 0.72
-            gx_f = tx + desired_dist * math.cos(tang_ang)
-            gy_f = ty + desired_dist * math.sin(tang_ang)
-            if math.hypot(gx_f - nc[0], gy_f - nc[1]) > nr * 0.86:
-                gx_f = 0.6 * gx_f + 0.4 * nc[0]
-                gy_f = 0.6 * gy_f + 0.4 * nc[1]
-            goal_x, goal_y = gx_f, gy_f
+            if has_los_target or d_target_2d < 75.0:
+                use_local_fight_move = True
+                move_x, move_y = self._local_fight_move(
+                    obs, target_mech, los_mechs, desired_dist,
+                    gun_reloading or hp_frac < 0.58, cur_zc, cur_zr,
+                )
+            else:
+                goal_x, goal_y = target_mech["pos"][0], target_mech["pos"][1]
 
-            # Short boost taps when energy is full to break enemy gun prediction
-            if has_los_target and energy > 80.0 and (obs["tick"] % 10 < 2):
+            if has_los_target and energy > 82.0 and (obs["tick"] % 10 < 2):
                 want_boost = True
 
         elif farm_obj is not None:
             mode = "FARM"
             fx, fy, _ = farm_obj[0]
             ang_from_f = math.atan2(my - fy, mx - fx)
-            # Strafe around NPCs at ~32m so slow 90m/s NPC bullets miss
-            tang = ang_from_f + self.strafe_dir * 0.6
+            tang = ang_from_f + self.strafe_dir * 0.65
             dist_f = 32.0 if farm_obj[2] == "npc" else 22.0
             goal_x, goal_y = fx + dist_f * math.cos(tang), fy + dist_f * math.sin(tang)
 
         else:
-            # Patrol smoothly inside safe circle (keep moving gently so never a sitting target)
             mode = "PATROL"
-            ang_patrol = t * 0.25 + (self.rng.random() * 0.01)
+            ang_patrol = t * 0.3
             pat_r = min(nr * 0.55, max(8.0, nr - 20.0))
             goal_x = nc[0] + pat_r * math.cos(ang_patrol)
             goal_y = nc[1] + pat_r * math.sin(ang_patrol)
 
-        # --- Fast Pathfinding + Dodge blending -----------------------------
-        need_path = (
-            self.cached_wp is None
-            or self.cached_goal is None
-            or math.hypot(goal_x - self.cached_goal[0], goal_y - self.cached_goal[1]) > 14.0
-            or t - self.last_path_t > 0.7
-        )
-        if need_path and (time.perf_counter() - t_wall0) < 0.015:
-            self.cached_goal = (goal_x, goal_y)
-            self.cached_wp = self.world.find_next_waypoint(mx, my, goal_x, goal_y)
-            self.last_path_t = t
+        # --- Navigation (with waypoint-arrival refresh fix!) ----------------
+        if not use_local_fight_move:
+            wp_reached = self.cached_wp is not None and math.hypot(self.cached_wp[0] - mx, self.cached_wp[1] - my) < 3.5
+            need_path = (
+                self.cached_wp is None
+                or self.cached_goal is None
+                or wp_reached
+                or math.hypot(goal_x - self.cached_goal[0], goal_y - self.cached_goal[1]) > 14.0
+                or t - self.last_path_t > 0.7
+            )
+            if need_path and (time.perf_counter() - t_wall0) < 0.015:
+                self.cached_goal = (goal_x, goal_y)
+                self.cached_wp = self.world.find_next_waypoint(mx, my, goal_x, goal_y)
+                self.last_path_t = t
 
-        wx, wy = self.cached_wp if self.cached_wp is not None else (goal_x, goal_y)
-        move_x, move_y = wx - mx, wy - my
-        mlen = math.hypot(move_x, move_y)
-        if mlen > 1.5:
-            move_x /= mlen
-            move_y /= mlen
-        elif mode in ("CUBE", "LOOT"):
-            move_x /= 1.5
-            move_y /= 1.5
-        else:
-            move_x, move_y = 0.0, 0.0
+            wx, wy = self.cached_wp if self.cached_wp is not None else (goal_x, goal_y)
+            move_x, move_y = wx - mx, wy - my
+            mlen = math.hypot(move_x, move_y)
+            if mlen > 1.2:
+                move_x /= mlen
+                move_y /= mlen
+            elif mode in ("CUBE", "LOOT", "DROP"):
+                move_x /= 1.2
+                move_y /= 1.2
+            else:
+                move_x, move_y = 0.0, 0.0
 
         dx_d, dy_d, dodge_boost, dodge_jump = self._dodge_vector(obs)
         if dx_d != 0.0 or dy_d != 0.0:
@@ -1378,41 +1433,22 @@ class Bot:
 
             if allow_fire:
                 aim_owner: Optional[int] = None
-                gun_ready = any(
-                    w and w["kind"] == "gun" and float(w.get("reload", 0.0)) <= 0.10 and w.get("ammo", 0) > 0
-                    for w in me["weapons"]
-                )
-                gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.15 for w in me["weapons"])
                 mortar_sol: Optional[Tuple[float, float]] = None
 
-                # Laser gets aim if already charging, OR if >=65m / vs mortar / gun reloading / lethal
+                # Full-range laser burst (315 dmg / 504 vs mortar) unless critically low at close range
                 for idx, w in enumerate(me["weapons"]):
                     if w and w["kind"] == "laser":
                         l_range = float(w["stats"].get("range", 280.0))
                         ch = float(w.get("charge", 0.0))
-                        use_laser = (
-                            ch > 0.0
-                            or (
-                                float(w["cooldown"]) <= 0.10
-                                and has_los_target
-                                and (
-                                    d_to_target >= 65.0
-                                    or "mortar" in target_mech.get("weapons", [])
-                                    or gun_reloading
-                                    or t_hp <= 330.0
-                                    or not gun_ready
-                                )
-                            )
-                        )
-                        if use_laser and d_to_target <= l_range:
+                        safe_to_charge = not (hp_frac < 0.35 and d_to_target < 45.0)
+                        if (ch > 0.0 or (float(w["cooldown"]) <= 0.10 and has_los_target and safe_to_charge)) and d_to_target <= l_range:
                             aim_owner = idx
                             break
 
-                # Mortar gets aim ONLY when target behind cover, gun reloading, or > 100m
                 if aim_owner is None:
                     for idx, w in enumerate(me["weapons"]):
                         if w and w["kind"] == "mortar" and float(w["cooldown"]) <= 0.10:
-                            if (not has_los_target or gun_reloading or d_to_target >= 100.0) and (time.perf_counter() - t_wall0) < 0.020:
+                            if (not has_los_target or gun_reloading or d_to_target >= 34.0) and (time.perf_counter() - t_wall0) < 0.020:
                                 mortar_sol = solve_mortar_aim(
                                     my_mortar_muzzle, t_pos, t_vel,
                                     float(w["stats"].get("speed", 72.0)),
@@ -1452,7 +1488,7 @@ class Bot:
                             dmg_full *= 1.6
                         err_y = angle_diff(me["aim"][0], direct_yaw)
                         err_p = abs(me["aim"][1] - direct_pitch)
-                        tol = clamp(math.atan2(2.2 * t_scale, max(1.0, d_to_target)), 0.025, 0.10)
+                        tol = clamp(math.atan2(2.3 * t_scale, max(1.0, d_to_target)), 0.025, 0.10)
                         if charge > 0.0:
                             frac = clamp(charge / max(0.01, full_c), 0.0, 1.0)
                             est_dmg = dmg_full * (min_frac + (1.0 - min_frac) * frac)
@@ -1526,7 +1562,6 @@ class Bot:
         if want_reload:
             act["reload"] = True
 
-        mf.draw.point([goal_x, goal_y, mz], "#40c0ff", 5)
         mf.draw.label(f"{mode} | hp {hp:.0f} | c {me['cubes']:.0f}")
         return act
 
