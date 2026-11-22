@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Protocol conformance check for a mechfight/1 bot. Standard library only.
 
-    python3 tests/check.py -- python3 -u src/bot.py
-    python3 tests/check.py -- node vendor/typescript/example.ts
-    python3 tests/check.py --map-dir /arena -- docker run --rm -i -v "$PWD/assets/map:/arena:ro" my-bot
+    python3 check/check.py -- python3 -u python/example_bot.py
+    python3 check/check.py -- node ts/example.ts
+    python3 check/check.py --map-dir /arena -- docker run --rm -i -v "$PWD/arena:/arena:ro" my-bot
 
-It plays a recorded stream (tests/fixtures/stream.jsonl.gz: a hello, 300 observations from a real match, an
+It plays a recorded stream (check/stream.jsonl.gz: a hello, 300 observations from a real match, an
 end) to your bot and checks what comes back: `ready` in time, one valid action per observation with
 the right tick, answers within the time budget, the newest-observation rule when observations queue
 up, debug drawings inside the caps, and a clean exit after `end`. Every message is checked against
-docs/mechfight.schema.json.
+mechfight.schema.json.
 
 It is not a game. The observations don't react to your actions, so it says nothing about how well your
 bot plays: submit it for a practice score.
@@ -140,9 +140,9 @@ class Bot:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0], usage="%(prog)s [options] -- <bot command...>")
-    ap.add_argument("--stream", default=os.path.join(HERE, "fixtures", "stream.jsonl.gz"))
-    ap.add_argument("--schema", default=os.path.join(KIT, "docs", "mechfight.schema.json"))
-    ap.add_argument("--map-dir", default=os.path.join(KIT, "assets", "map"), help="what hello.map.dir says (default: assets/map/)")
+    ap.add_argument("--stream", default=os.path.join(HERE, "stream.jsonl.gz"))
+    ap.add_argument("--schema", default=os.path.join(KIT, "mechfight.schema.json"))
+    ap.add_argument("--map-dir", default=os.path.join(KIT, "arena"), help="what hello.map.dir says (default: the kit's arena/)")
     ap.add_argument("cmd", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     cmd = a.cmd[1:] if a.cmd[:1] == ["--"] else a.cmd
