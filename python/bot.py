@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v14"
+    name = "hybrid-v19"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -1169,6 +1169,7 @@ class Bot:
 
         t1_scale = 1.0 + self.size_per_cube * float(target_mech.get("cubes", 0.0))
         t1_eye = [tx, ty, target_mech["pos"][2] + 8.0 * t1_scale]
+        target_visible = any(m["id"] == target_mech["id"] for m in los_mechs)
         other_threat = None
         for m2 in los_mechs:
             if m2["id"] != target_mech["id"]:
@@ -1188,7 +1189,9 @@ class Bot:
 
         best_dx, best_dy = math.cos(tang_pref), math.sin(tang_pref)
         best_score = -1e9
-        do_iso_los = (t2_eye is not None or reload_hide) and ((time.perf_counter() - t_wall0) < 0.011)
+        do_iso_los = (
+            t2_eye is not None or reload_hide or not target_visible
+        ) and ((time.perf_counter() - t_wall0) < 0.011)
 
         for k in range(16):
             ang = k * (math.pi / 8.0)
@@ -1215,6 +1218,8 @@ class Bot:
                 cz = self.world.terrain_z(nx_p, ny_p)
                 c_eye = [nx_p, ny_p, cz + eye_h]
                 see_t1 = self.world.has_los(c_eye, t1_eye)
+                if not target_visible and see_t1:
+                    score += 55.0
                 if reload_hide and not see_t1:
                     score += 30.0
                 if t2_eye is not None:
