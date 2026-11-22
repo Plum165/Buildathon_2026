@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v19"
+    name = "hybrid-v20-defense"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -1330,13 +1330,19 @@ class Bot:
 
         kill_confirm = target_mech is not None and target_hp < 550.0 and hp > 280.0 and len(los_mechs) <= 2
         outnumbered = len(los_mechs) >= 2 and hp_frac < 0.55 and target_hp >= 450.0
+        nearby_threat = (
+            target_mech is not None
+            and has_los_target
+            and d_target_2d < 105.0
+            and not kill_confirm
+        )
         losing_duel = (
             target_mech is not None
             and not kill_confirm
             and hp_frac < 0.26
             and target_hp > hp * 1.6
         )
-        need_retreat = outnumbered or losing_duel
+        need_retreat = outnumbered or losing_duel or nearby_threat
 
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
         gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.30 for w in me["weapons"])
