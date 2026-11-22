@@ -1,4 +1,4 @@
-"""Mortar-specialist duelist & over-wall bombardment bot for mechfight/1."""
+"""v9 lethal combat + zero-penalty survivability, bullet-boost dodge & exact mortar for mechfight/1."""
 from __future__ import annotations
 
 import array
@@ -579,7 +579,7 @@ class WorldMap:
 
 
 # ---------------------------------------------------------------------------
-# Ballistic & aiming helpers (with exact 3.0m barrel origin for mortar!)
+# Ballistic & aiming helpers
 # ---------------------------------------------------------------------------
 
 def solve_lead_aim(
@@ -623,13 +623,9 @@ def solve_mortar_aim(
     shot_origin_dist: float = 3.0, lead_scale: float = 0.85,
     prefer_high: bool = False,
 ) -> Optional[Tuple[float, float]]:
-    """Exact mortar ballistic solver accounting for 3.0m shot origin + low/high arcs."""
-    # Aim slightly above feet (lower torso z+2.2) so direct hits & splash both connect
     base_z = target_pos[2] + 2.2
     flight_t = horiz_dist(muzzle, target_pos) / max(speed * 0.82, 1.0)
     pred = [target_pos[0], target_pos[1], base_z]
-
-    # Refine predicted target position + flight time (including 0.05s tick offset)
     p_est = 0.25
     for _ in range(4):
         lt = clamp(flight_t, 0.0, 3.0) * lead_scale + 0.05
@@ -660,7 +656,6 @@ def solve_mortar_aim(
         return None
     yaw = math.atan2(dy, dx)
 
-    # Try preferred arc order (high first if target behind wall, else low first for speed)
     cand_pitches: List[float] = []
     for use_hi in ((True, False) if prefer_high else (False, True)):
         p_cur = 0.9 if use_hi else 0.2
@@ -690,7 +685,6 @@ def solve_mortar_aim(
         ox = muzzle[0] + shot_origin_dist * cos_p * math.cos(yaw)
         oy = muzzle[1] + shot_origin_dist * cos_p * math.sin(yaw)
         oz = muzzle[2] + shot_origin_dist * sin_p
-        # Also verify muzzle origin isn't inside a wall right in front of us
         if not world_map.has_los(muzzle, [ox, oy, oz]):
             continue
         ok = True
@@ -711,12 +705,11 @@ def solve_mortar_aim(
 # Bot controller
 # ---------------------------------------------------------------------------
 
-# Mortar-specialist priority: mortar > laser > lightning > gun
-WEAPON_PRIORITY = {"mortar": 4, "laser": 3, "lightning": 2, "gun": 1}
+WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "mortar-v10"
+    name = "survivor-v11"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -768,29 +761,33 @@ class Bot:
                 req = udef.get("requires")
                 if req and req not in held_kinds:
                     score -= 60.0
+                elif req == "lightning" and ("laser" not in held_kinds and "mortar" not in held_kinds):
+                    score -= 25.0
+
                 for eff in udef.get("effects", []):
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
-                    if req == "mortar" or path.startswith("mortar"):
-                        score += 135.0
-                    elif req == "gun" or path.startswith("gun"):
-                        score += 128.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 95.0
-                    elif "damage_mult" in path or "armor" in path:
-                        score += 126.0
+                    # Survival-first multiplicative EHP + primary gun DPS
+                    if "damage_mult" in path or "armor" in path:
+                        score += 138.0
                     elif "max_hp" in path:
-                        score += 108.0
-                    elif req == "laser" or path.startswith("laser"):
-                        score += 106.0 if "charge" in path else 95.0
-                    elif "walk_speed" in path or "boost_speed" in path:
-                        score += 96.0
+                        score += 122.0
+                    elif req == "gun" or path.startswith("gun"):
+                        score += 120.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 92.0
                     elif "regen_delay" in path or "regen_per_s" in path:
-                        score += 90.0
+                        score += 112.0
+                    elif "walk_speed" in path or "boost_speed" in path:
+                        score += 104.0
+                    elif req == "laser" or path.startswith("laser"):
+                        score += 102.0 if "charge" in path else 92.0
+                    elif req == "mortar" or path.startswith("mortar"):
+                        score += 94.0
                     elif "energy" in path or "jet" in path:
-                        score += 82.0
-                    elif req == "lightning" or path.startswith("lightning"):
-                        score += 65.0
+                        score += 88.0
                     elif "near_range" in path or "bearing_noise" in path or "vision" in path:
+                        score += 70.0
+                    elif req == "lightning" or path.startswith("lightning"):
                         score += 65.0
                     elif "turn_rate" in path or "pitch_rate" in path:
                         score += 55.0
@@ -798,13 +795,13 @@ class Bot:
                         score += abs(mul - 1.0) * 40.0 + abs(add) * 2.0
             else:
                 desc = (choice.get("name", "") + " " + choice.get("desc", "")).lower()
-                if "mortar" in desc:
+                if "armor" in desc or "damage taken" in desc:
                     score += 135.0
+                elif "hp" in desc or "regen" in desc:
+                    score += 118.0
                 elif "gun" in desc or "fire rate" in desc:
-                    score += 128.0
-                elif "armor" in desc or "damage taken" in desc:
-                    score += 124.0
-                elif "hp" in desc or "speed" in desc:
+                    score += 115.0
+                elif "speed" in desc or "energy" in desc:
                     score += 100.0
             if score > best_score:
                 best_score, best_i = score, idx
@@ -858,16 +855,19 @@ class Bot:
             z["center"][1] + (z["next_center"][1] - z["center"][1]) * frac,
         ], float(z["radius"] + (z["next_radius"] - z["radius"]) * frac)
 
-    def _update_awareness(self, obs: mf.Observation) -> Optional[float]:
+    def _update_awareness(self, obs: mf.Observation) -> Tuple[Optional[float], bool]:
         t = obs["t"]
         me = obs["self"]
         mx, my, mz = me["pos"]
         rear_bearing: Optional[float] = None
+        heavy_rear = False
 
         for ev in obs["events"]:
             if ev["type"] == "damaged":
                 if ev.get("rear") and ev.get("bearing") is not None:
                     rear_bearing = float(ev["bearing"])
+                    if float(ev.get("amount", 0.0)) >= 55.0:
+                        heavy_rear = True
                 by = ev.get("by")
                 if by is not None:
                     bid = int(by)
@@ -951,11 +951,12 @@ class Bot:
                 if s["dist"] != "far":
                     self.recent_sounds.append((t - float(s["age"]), float(s["bearing"]), s["dist"]))
 
-        return rear_bearing
+        return rear_bearing, heavy_rear
 
     def _dodge_vector(self, obs: mf.Observation) -> Tuple[float, float, bool, bool]:
         me = obs["self"]
         mx, my, mz = me["pos"]
+        energy = me["energy"]
         scale = 1.0 + self.size_per_cube * me["cubes"]
         com_z = mz + 4.5 * scale
         dodge_x, dodge_y = 0.0, 0.0
@@ -997,9 +998,12 @@ class Bot:
                         hv = math.hypot(vx, vy) or 1.0
                         px_n, py_n = -vy / hv, vx / hv
                         sign = 1.0 if ((mx - cx) * px_n + (my - cy) * py_n) >= 0.0 else -1.0
-                        w = (4.9 * scale - d_ca) * 0.6
+                        w = (4.9 * scale - d_ca) * 0.65
                         dodge_x += px_n * sign * w
                         dodge_y += py_n * sign * w
+                        # Use boost to sidestep center-mass incoming bullets when energy allows
+                        if d_ca < 3.4 * scale and energy > 55.0:
+                            urgent_boost = True
 
         for th in self.threats.values():
             if not th["visible"] or not th["charging"]:
@@ -1053,12 +1057,19 @@ class Bot:
                 score = 0.0
                 d_next = math.hypot(cx - nc[0], cy - nc[1])
                 score += 65.0 if d_next <= max(8.0, nr * 0.9) else -(d_next - nr) * 1.8
+                if self.world.has_near_tall_wall(cx, cy):
+                    score += 20.0
                 for th in active_threats:
                     tx, ty, tz = th["pos"]
                     t_scale = 1.0 + self.size_per_cube * th.get("cubes", 0.0)
                     if not self.world.has_los(c_eye, [tx, ty, tz + 8.0 * t_scale]):
                         score += 135.0
                     score += min(math.hypot(cx - tx, cy - ty), 95.0) * 0.45
+                for _, sb, sd in self.recent_sounds:
+                    sx, sy = mx + 70.0 * math.cos(sb), my + 70.0 * math.sin(sb)
+                    d_s = math.hypot(cx - sx, cy - sy)
+                    if d_s < 80.0:
+                        score -= (80.0 - d_s) * (0.4 if sd == "near" else 0.2)
                 score -= dist_r * 0.4
                 if score > best_score:
                     best_score = score
@@ -1149,14 +1160,27 @@ class Bot:
                 if not need_weapon and prio <= worst_prio:
                     continue
                 px, py = p["pos"][0], p["pos"][1]
-                # Extra draw toward mortar pickups!
-                reward = (270.0 if need_weapon else 135.0) + prio * 26.0
+                reward = (260.0 if need_weapon else 120.0) + prio * 22.0
                 roi = reward / risk_divisor(px, py, 0.5)
                 if roi > best_roi:
                     best_roi = roi
                     best_goal = (px, py, "LOOT")
 
-        return best_goal if best_roi >= 1.25 else None
+        # Close uncontested supply drop when hurt (<65% HP) for full heal + 3 cubes
+        if not has_los_target and hp_frac < 0.65 and len(self.threats) <= 1:
+            for dr in obs["drops"]:
+                dx, dy = dr["pos"][0], dr["pos"][1]
+                d = math.hypot(dx - mx, dy - my)
+                if dr["lands_in"] > 8.0 or d > 70.0:
+                    continue
+                if dr["holder"] is not None and dr["holder"] != me["id"]:
+                    continue
+                roi = 520.0 / risk_divisor(dx, dy, float(dr["capture_s"]))
+                if roi > best_roi:
+                    best_roi = roi
+                    best_goal = (dx, dy, "DROP")
+
+        return best_goal if best_roi >= 1.30 else None
 
     def _local_fight_move(
         self, obs: mf.Observation, target_mech: Dict[str, Any],
@@ -1214,7 +1238,7 @@ class Bot:
             if other_threat is not None:
                 d2_new = math.hypot(nx_p - other_threat["pos"][0], ny_p - other_threat["pos"][1])
                 d2_old = math.hypot(mx - other_threat["pos"][0], my - other_threat["pos"][1])
-                score += (d2_new - d2_old) * 2.0
+                score += (d2_new - d2_old) * 2.2
 
             if do_iso_los and (k % 4 == 0) and (time.perf_counter() - t_wall0) < 0.014:
                 cz = self.world.terrain_z(nx_p, ny_p)
@@ -1222,12 +1246,12 @@ class Bot:
                 see_t1 = self.world.has_los(c_eye, t1_eye)
                 see_t2 = self.world.has_los(c_eye, t2_eye)  # type: ignore[arg-type]
                 if see_t1 and not see_t2:
-                    score += 32.0
+                    score += 36.0
                 elif see_t1 and see_t2:
-                    score -= 22.0
+                    score -= 24.0
 
             if peek_cover and self.world.has_near_tall_wall(nx_p, ny_p):
-                score += 10.0
+                score += 9.0
             if math.hypot(nx_p - nc[0], ny_p - nc[1]) > nr * 0.88:
                 score -= 14.0
             if self.world.point_near_wall(mx + 14.0 * ux, my + 14.0 * uy, 2.4):
@@ -1241,49 +1265,6 @@ class Bot:
             self.strafe_dir *= -1
 
         return best_dx, best_dy
-
-    def _pick_mortar_target(
-        self, obs: mf.Observation, primary: Optional[Dict[str, Any]], vis_mechs: List[Dict[str, Any]],
-    ) -> Optional[Tuple[List[float], List[float], float]]:
-        """Picks best mortar target (clusters > primary > recent behind-cover threat)."""
-        t = obs["t"]
-        me = obs["self"]
-        mx, my, _ = me["pos"]
-
-        # Check for clustered enemies (<10m apart) for double 160-splash + concuss!
-        if len(vis_mechs) >= 2:
-            for i in range(len(vis_mechs)):
-                for j in range(i + 1, len(vis_mechs)):
-                    m1, m2 = vis_mechs[i], vis_mechs[j]
-                    if horiz_dist(m1["pos"], m2["pos"]) < 10.0:
-                        mid_p = [
-                            0.5 * (m1["pos"][0] + m2["pos"][0]),
-                            0.5 * (m1["pos"][1] + m2["pos"][1]),
-                            0.5 * (m1["pos"][2] + m2["pos"][2]),
-                        ]
-                        mid_v = [
-                            0.5 * (m1["vel"][0] + m2["vel"][0]),
-                            0.5 * (m1["vel"][1] + m2["vel"][1]),
-                            0.5 * (m1["vel"][2] + m2["vel"][2]),
-                        ]
-                        if horiz_dist(me["pos"], mid_p) >= 18.0:
-                            return mid_p, mid_v, 0.80
-
-        if primary is not None:
-            pid = int(primary["id"])
-            accel = float(self.threats.get(pid, {}).get("accel", 0.0))
-            lscale = 0.58 if accel > 20.0 else 0.88
-            return list(primary["pos"]), list(primary["vel"]), lscale
-
-        # Bombard recently tracked threats behind walls
-        recent = sorted(
-            (th for th in self.threats.values() if t - th["t"] < 2.2 and math.hypot(th["pos"][0] - mx, th["pos"][1] - my) >= 18.0),
-            key=lambda th: t - th["t"],
-        )
-        if recent:
-            th = recent[0]
-            return list(th["pos"]), list(th["vel"]), 0.65
-        return None
 
     def act(self, obs: mf.Observation) -> mf.Action:
         t_wall0 = time.perf_counter()
@@ -1299,7 +1280,6 @@ class Bot:
         my_eye = [mx, my, mz + float(me["stats"].get("eye_height", 8.0 * scale))]
         my_muzzle_now = [mx, my, mz + float(me["stats"].get("muzzle_height", 7.0 * scale))]
         my_muzzle = [my_muzzle_now[0] + mvx * 0.05, my_muzzle_now[1] + mvy * 0.05, my_muzzle_now[2] + mvz * 0.05]
-        # Exact scaled mortar height (height + 0.5 = 9.5 * scale)
         my_mortar_muzzle = [mx, my, mz + 9.5 * scale]
         shot_origin_dist = 2.5 * scale + 0.5
         walk_spd = float(me["stats"].get("walk_speed", self.walk_speed))
@@ -1328,7 +1308,7 @@ class Bot:
         if loot_act:
             act.update(loot_act)  # type: ignore[arg-type]
 
-        rear_bearing = self._update_awareness(obs)
+        rear_bearing, heavy_rear = self._update_awareness(obs)
 
         cur_zc, cur_zr = self._zone_circle(obs)
         z_obs = obs["zone"]
@@ -1366,29 +1346,33 @@ class Bot:
         d_target_2d = horiz_dist(me["pos"], target_mech["pos"]) if target_mech else 999.0
         target_hp = float(target_mech.get("hp", 1000.0)) if target_mech else 9999.0
 
-        kill_confirm = target_mech is not None and target_hp < 550.0 and hp > 280.0 and len(los_mechs) <= 2
-        outnumbered = len(los_mechs) >= 2 and hp_frac < 0.55 and target_hp >= 450.0
+        kill_confirm = target_mech is not None and target_hp < 520.0 and hp > 290.0 and len(los_mechs) <= 1
+        outnumbered = len(los_mechs) >= 2 and hp_frac < 0.65 and target_hp >= 420.0
         losing_duel = (
             target_mech is not None
             and not kill_confirm
-            and hp_frac < 0.26
-            and target_hp > hp * 1.6
+            and hp_frac < 0.28
+            and target_hp > hp * 1.5
         )
         need_retreat = outnumbered or losing_duel
+        multi_threat_near = (
+            len(los_mechs) >= 2
+            or sum(1 for th in self.threats.values() if t - th["t"] < 3.0 and horiz_dist(me["pos"], th["pos"]) < 95.0) >= 2
+        )
 
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
-        has_mortar = "mortar" in held_kinds
         gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.25 for w in me["weapons"])
 
+        # Only farm NPCs/crates when healthy (>72%) so we don't reset 5s regen between waves!
         farm_obj: Optional[Tuple[List[float], List[float], str]] = None
-        if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0 and me["cubes"] < self.cube_stat_cap:
+        if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0 and me["cubes"] < self.cube_stat_cap and hp_frac > 0.72:
             near_npc = min(vis_npcs, key=lambda n: horiz_dist(me["pos"], n["pos"]), default=None)
             near_crate = min(obs["crates"], key=lambda c: horiz_dist(me["pos"], c["pos"]), default=None)
-            if near_npc and horiz_dist(me["pos"], near_npc["pos"]) < 95.0 and hp_frac > 0.58:
+            if near_npc and horiz_dist(me["pos"], near_npc["pos"]) < 95.0:
                 np_p = near_npc["pos"]
                 if self.world.has_los(my_eye, [np_p[0], np_p[1], np_p[2] + 1.75]):
                     farm_obj = ([np_p[0], np_p[1], np_p[2] + 1.75], list(near_npc["vel"]), "npc")
-            elif near_crate and horiz_dist(me["pos"], near_crate["pos"]) < 85.0 and hp_frac > 0.60:
+            elif near_crate and horiz_dist(me["pos"], near_crate["pos"]) < 85.0:
                 cp = near_crate["pos"]
                 if self.world.has_los(my_eye, [cp[0], cp[1], cp[2] + 1.0]):
                     farm_obj = ([cp[0], cp[1], cp[2] + 1.0], [0.0, 0.0, 0.0], "crate")
@@ -1424,24 +1408,24 @@ class Bot:
             mode = "KILL" if kill_confirm else "FIGHT"
             e_weapons = set(target_mech.get("weapons", []))
 
-            # With mortar: keep 46m+ (avoid self-splash) and use cover at 58m when hurt/reloading
-            desired_dist = 46.0 if has_mortar else 39.0
+            # 42m 1v1, 60m when multi-threat nearby to prevent crossfire, 32m for kill confirm
+            desired_dist = 60.0 if multi_threat_near else 42.0
             if kill_confirm:
                 desired_dist = 32.0
                 if (not has_los_target or d_target_2d > 45.0) and energy > 45.0:
                     want_boost = True
             elif "lightning" in e_weapons and "lightning" not in held_kinds:
                 desired_dist = 74.0
-            elif has_mortar and (gun_reloading or hp_frac < 0.55):
-                desired_dist = 64.0
             elif "lightning" in held_kinds and target_mech.get("charging") and energy > 38.0 and d_target_2d < 65.0:
                 desired_dist = 32.0
+            elif "mortar" in held_kinds and "laser" not in held_kinds and not has_los_target:
+                desired_dist = 82.0
 
-            if has_los_target or d_target_2d < 75.0:
+            if has_los_target or d_target_2d < 70.0:
                 use_local_fight_move = True
                 move_x, move_y = self._local_fight_move(
                     obs, target_mech, los_mechs, desired_dist,
-                    gun_reloading or hp_frac < 0.55, cur_zc, cur_zr, t_wall0,
+                    gun_reloading or hp_frac < 0.52, cur_zc, cur_zr, t_wall0,
                 )
             else:
                 goal_x, goal_y = target_mech["pos"][0], target_mech["pos"][1]
@@ -1456,6 +1440,11 @@ class Bot:
             tang = ang_from_f + self.strafe_dir * 0.65
             dist_f = 28.0 if farm_obj[2] == "npc" else 18.0
             goal_x, goal_y = fx + dist_f * math.cos(tang), fy + dist_f * math.sin(tang)
+
+        elif hp_frac < 0.78:
+            # Between waves when injured: seek safe cover away from gunfire to finish 5s 45 HP/s regen!
+            mode = "RECOVER"
+            goal_x, goal_y = self._find_cover_pos(obs)
 
         else:
             mode = "PATROL"
@@ -1488,7 +1477,8 @@ class Bot:
                 move_x /= 1.2
                 move_y /= 1.2
             else:
-                move_x, move_y = 0.0, 0.0
+                move_x = 0.25 * math.cos(t * 1.7)
+                move_y = 0.25 * math.sin(t * 1.7)
 
         dx_d, dy_d, dodge_boost, dodge_jump = self._dodge_vector(obs)
         if dx_d != 0.0 or dy_d != 0.0:
@@ -1533,14 +1523,6 @@ class Bot:
         aim_yaw = me["aim"][0]
         aim_pitch = 0.0
 
-        # Check ready mortar even if retreating behind cover (lob over walls!)
-        mortar_slot: Optional[int] = None
-        mortar_sol: Optional[Tuple[float, float]] = None
-        for idx, w in enumerate(me["weapons"]):
-            if w and w["kind"] == "mortar" and float(w["cooldown"]) <= 0.10:
-                mortar_slot = idx
-                break
-
         if target_mech is not None:
             t_pos = list(target_mech["pos"])
             t_vel = list(target_mech["vel"])
@@ -1561,37 +1543,17 @@ class Bot:
             direct_pitch = math.atan2(t_laser_pt[2] - my_muzzle[2], max(0.1, horiz_dist(my_muzzle, t_laser_pt)))
             aim_yaw, aim_pitch = direct_yaw, direct_pitch
 
-            if rear_bearing is not None and not has_los_target:
-                aim_yaw, aim_pitch = rear_bearing, 0.0
+            turn_to_rear = rear_bearing is not None and (not has_los_target or (heavy_rear and target_hp > 350.0))
+            if turn_to_rear:
+                aim_yaw, aim_pitch = rear_bearing, 0.0  # type: ignore[assignment]
 
-            allow_fire = has_los_target or not need_retreat
+            allow_fire = (has_los_target or not need_retreat) and not (heavy_rear and target_hp > 350.0 and rear_bearing is not None)
 
-            aim_owner: Optional[int] = None
-            gun_ready = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) <= 0.10 and w.get("ammo", 0) > 0 for w in me["weapons"])
+            if allow_fire:
+                aim_owner: Optional[int] = None
+                mortar_sol: Optional[Tuple[float, float]] = None
+                gun_ready = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) <= 0.10 and w.get("ammo", 0) > 0 for w in me["weapons"])
 
-            # 1) Mortar gets priority whenever ready and >= 20m (or over walls even when retreating!)
-            if mortar_slot is not None and (time.perf_counter() - t_wall0) < 0.022:
-                mt_info = self._pick_mortar_target(obs, target_mech, vis_mechs)
-                if mt_info is not None:
-                    mt_pos, mt_vel, mt_lscale = mt_info
-                    d_mt = horiz_dist(me["pos"], mt_pos)
-                    # Fire mortar at >=20m in open fights, or >=18m over cover / during reload
-                    if d_mt >= 20.0 or not has_los_target:
-                        w_m = me["weapons"][mortar_slot]
-                        mortar_sol = solve_mortar_aim(
-                            my_mortar_muzzle, mt_pos, mt_vel,
-                            float(w_m["stats"].get("speed", 72.0)),  # type: ignore[index]
-                            float(w_m["stats"].get("gravity", 22.0)),  # type: ignore[index]
-                            self.world,
-                            shot_origin_dist=shot_origin_dist,
-                            lead_scale=mt_lscale,
-                            prefer_high=not has_los_target,
-                        )
-                        if mortar_sol is not None:
-                            aim_owner = mortar_slot
-
-            # 2) Laser snap if not yielding to ready mortar
-            if aim_owner is None and allow_fire:
                 for idx, w in enumerate(me["weapons"]):
                     if w and w["kind"] == "laser":
                         l_range = float(w["stats"].get("range", 280.0))
@@ -1608,78 +1570,92 @@ class Bot:
                             aim_owner = idx
                             break
 
-            if aim_owner is not None:
-                if aim_owner == mortar_slot and mortar_sol is not None:
-                    aim_yaw, aim_pitch = mortar_sol
+                if aim_owner is None:
+                    for idx, w in enumerate(me["weapons"]):
+                        if w and w["kind"] == "mortar" and float(w["cooldown"]) <= 0.10:
+                            if (not has_los_target or gun_reloading or d_to_target >= 55.0) and (time.perf_counter() - t_wall0) < 0.020:
+                                t_acc = float(self.threats.get(int(target_mech["id"]), {}).get("accel", 0.0))
+                                mortar_sol = solve_mortar_aim(
+                                    my_mortar_muzzle, t_pos, t_vel,
+                                    float(w["stats"].get("speed", 72.0)),
+                                    float(w["stats"].get("gravity", 22.0)),
+                                    self.world,
+                                    shot_origin_dist=shot_origin_dist,
+                                    lead_scale=0.58 if t_acc > 20.0 else 0.85,
+                                    prefer_high=not has_los_target,
+                                )
+                                if mortar_sol is not None:
+                                    aim_owner = idx
+                                    break
+
+                if aim_owner is not None:
+                    if me["weapons"][aim_owner]["kind"] == "mortar" and mortar_sol is not None:  # type: ignore[index]
+                        aim_yaw, aim_pitch = mortar_sol
+                    else:
+                        aim_yaw, aim_pitch = direct_yaw, direct_pitch
                 else:
-                    aim_yaw, aim_pitch = direct_yaw, direct_pitch
-            elif allow_fire:
-                for idx, w in enumerate(me["weapons"]):
-                    if w and w["kind"] == "gun" and float(w.get("reload", 0.0)) <= 0.10 and w.get("ammo", 0) > 0 and has_los_target:
-                        aim_yaw, aim_pitch = solve_lead_aim(my_muzzle, t_com, t_vel, float(w["stats"].get("speed", 252.0)))
-                        break
+                    for idx, w in enumerate(me["weapons"]):
+                        if w and w["kind"] == "gun" and float(w.get("reload", 0.0)) <= 0.10 and w.get("ammo", 0) > 0 and has_los_target:
+                            aim_yaw, aim_pitch = solve_lead_aim(my_muzzle, t_com, t_vel, float(w["stats"].get("speed", 252.0)))
+                            break
 
-            # Trigger firing evaluation
-            for slot_i, w in enumerate(me["weapons"]):
-                if w is None:
-                    continue
-                kind = w["kind"]
-                st = w["stats"]
-                cd = float(w.get("cooldown", 0.0))
+                for slot_i, w in enumerate(me["weapons"]):
+                    if w is None:
+                        continue
+                    kind = w["kind"]
+                    st = w["stats"]
+                    cd = float(w.get("cooldown", 0.0))
 
-                if kind == "mortar":
-                    if slot_i == mortar_slot and mortar_sol is not None and cd <= 0.10:
-                        m_yaw, m_pitch = mortar_sol
-                        if angle_diff(me["aim"][0], m_yaw) < 0.14 and abs(me["aim"][1] - m_pitch) < 0.14:
-                            fire[slot_i] = True
+                    if kind == "laser":
+                        l_range = float(st.get("range", 280.0))
+                        charge = float(w.get("charge", 0.0))
+                        full_c = float(st.get("charge", 0.75))
+                        min_c = float(st.get("min_charge", 0.15))
+                        min_frac = float(st.get("min_frac", 0.35))
+                        dmg_full = float(st.get("damage", 315.0))
+                        if "mortar" in target_mech.get("weapons", []):
+                            dmg_full *= 1.6
+                        err_y = angle_diff(me["aim"][0], direct_yaw)
+                        err_p = abs(me["aim"][1] - direct_pitch)
+                        tol = clamp(math.atan2(1.7 * t_scale, max(1.0, d_to_target)), 0.024, 0.085)
+                        if charge > 0.0:
+                            frac = clamp(charge / max(0.01, full_c), 0.0, 1.0)
+                            est_dmg = dmg_full * (min_frac + (1.0 - min_frac) * frac)
+                            ready_rel = charge >= full_c - 0.08 or (charge >= min_c and est_dmg >= target_hp * 1.02)
+                            if ready_rel and has_los_target and (err_y < tol or charge >= full_c + 0.35) and err_p < tol * 1.6:
+                                fire[slot_i] = False
+                            else:
+                                fire[slot_i] = True
+                        elif cd <= 0.10 and d_to_target <= l_range and has_los_target and err_y < 0.45:
+                            if not (hp_frac < 0.32 and d_to_target < 38.0):
+                                fire[slot_i] = True
 
-                elif not allow_fire:
-                    continue
+                    elif kind == "mortar":
+                        if mortar_sol is not None and cd <= 0.10:
+                            m_yaw, m_pitch = mortar_sol
+                            if angle_diff(me["aim"][0], m_yaw) < 0.14 and abs(me["aim"][1] - m_pitch) < 0.14:
+                                fire[slot_i] = True
 
-                elif kind == "laser":
-                    l_range = float(st.get("range", 280.0))
-                    charge = float(w.get("charge", 0.0))
-                    full_c = float(st.get("charge", 0.75))
-                    min_c = float(st.get("min_charge", 0.15))
-                    min_frac = float(st.get("min_frac", 0.35))
-                    dmg_full = float(st.get("damage", 315.0))
-                    if "mortar" in target_mech.get("weapons", []):
-                        dmg_full *= 1.6
-                    err_y = angle_diff(me["aim"][0], direct_yaw)
-                    err_p = abs(me["aim"][1] - direct_pitch)
-                    tol = clamp(math.atan2(1.7 * t_scale, max(1.0, d_to_target)), 0.024, 0.085)
-                    if charge > 0.0:
-                        frac = clamp(charge / max(0.01, full_c), 0.0, 1.0)
-                        est_dmg = dmg_full * (min_frac + (1.0 - min_frac) * frac)
-                        ready_rel = charge >= full_c - 0.08 or (charge >= min_c and est_dmg >= target_hp * 1.02)
-                        if ready_rel and has_los_target and (err_y < tol or charge >= full_c + 0.35) and err_p < tol * 1.6:
-                            fire[slot_i] = False
-                        else:
-                            fire[slot_i] = True
-                    elif cd <= 0.10 and d_to_target <= l_range and has_los_target and err_y < 0.45:
-                        if not (hp_frac < 0.32 and d_to_target < 38.0):
-                            fire[slot_i] = True
+                    elif kind == "lightning":
+                        lt_range = float(st.get("range", 45.0))
+                        cone_rad = math.radians(float(st.get("cone_deg", 30.0)) * 0.5)
+                        if cd <= 0.10 and d_to_target <= lt_range and has_los_target and energy > 22.0:
+                            if angle_diff(me["aim"][0], direct_yaw) <= cone_rad * 0.95:
+                                fire[slot_i] = True
 
-                elif kind == "lightning":
-                    lt_range = float(st.get("range", 45.0))
-                    cone_rad = math.radians(float(st.get("cone_deg", 30.0)) * 0.5)
-                    if cd <= 0.10 and d_to_target <= lt_range and has_los_target and energy > 20.0:
-                        if angle_diff(me["aim"][0], direct_yaw) <= cone_rad * 0.95:
-                            fire[slot_i] = True
-
-                elif kind == "gun":
-                    g_range = float(st.get("range", 230.0))
-                    g_speed = float(st.get("speed", 252.0))
-                    ammo = float(w.get("ammo", 0.0))
-                    reloading = float(w.get("reload", 0.0)) > 0.10
-                    if ammo <= 3 and not has_los_target and float(w.get("reload", 0.0)) <= 0.0:
-                        want_reload = True
-                    if not reloading and ammo > 0 and d_to_target <= g_range and has_los_target:
-                        g_yaw, g_pitch = solve_lead_aim(my_muzzle, t_com, t_vel, g_speed)
-                        err_y = angle_diff(me["aim"][0], g_yaw)
-                        err_p = abs(me["aim"][1] - g_pitch)
-                        if cd <= 0.10 and err_y < 0.22 and err_p < 0.22:
-                            fire[slot_i] = True
+                    elif kind == "gun":
+                        g_range = float(st.get("range", 230.0))
+                        g_speed = float(st.get("speed", 252.0))
+                        ammo = float(w.get("ammo", 0.0))
+                        reloading = float(w.get("reload", 0.0)) > 0.10
+                        if ammo <= 3 and not has_los_target and float(w.get("reload", 0.0)) <= 0.0:
+                            want_reload = True
+                        if not reloading and ammo > 0 and d_to_target <= g_range and has_los_target:
+                            g_yaw, g_pitch = solve_lead_aim(my_muzzle, t_com, t_vel, g_speed)
+                            err_y = angle_diff(me["aim"][0], g_yaw)
+                            err_p = abs(me["aim"][1] - g_pitch)
+                            if cd <= 0.10 and err_y < 0.22 and err_p < 0.22:
+                                fire[slot_i] = True
 
         elif farm_obj is not None:
             ft_pos, ft_vel, _ = farm_obj
@@ -1706,39 +1682,18 @@ class Bot:
                         fire[slot_i] = True
 
         else:
-            # Indirect mortar fire on recently tracked threats even after leaving sight!
-            if mortar_slot is not None and (time.perf_counter() - t_wall0) < 0.020:
-                mt_info = self._pick_mortar_target(obs, None, vis_mechs)
-                if mt_info is not None:
-                    mt_pos, mt_vel, mt_lscale = mt_info
-                    w_m = me["weapons"][mortar_slot]
-                    mortar_sol = solve_mortar_aim(
-                        my_mortar_muzzle, mt_pos, mt_vel,
-                        float(w_m["stats"].get("speed", 72.0)),  # type: ignore[index]
-                        float(w_m["stats"].get("gravity", 22.0)),  # type: ignore[index]
-                        self.world,
-                        shot_origin_dist=shot_origin_dist,
-                        lead_scale=mt_lscale,
-                        prefer_high=True,
-                    )
-                    if mortar_sol is not None:
-                        aim_yaw, aim_pitch = mortar_sol
-                        if angle_diff(me["aim"][0], aim_yaw) < 0.14 and abs(me["aim"][1] - aim_pitch) < 0.14:
-                            fire[mortar_slot] = True
-
-            if mortar_sol is None:
-                if rear_bearing is not None:
-                    aim_yaw, aim_pitch = rear_bearing, 0.0
+            if rear_bearing is not None:
+                aim_yaw, aim_pitch = rear_bearing, 0.0
+            else:
+                recent = sorted((th for th in self.threats.values() if t - th["t"] < 4.5), key=lambda th: t - th["t"], reverse=True)
+                if recent:
+                    th = recent[0]
+                    aim_yaw = math.atan2(th["pos"][1] - my_muzzle[1], th["pos"][0] - my_muzzle[0])
+                elif self.recent_sounds:
+                    aim_yaw = self.recent_sounds[-1][1]
                 else:
-                    recent = sorted((th for th in self.threats.values() if t - th["t"] < 4.5), key=lambda th: t - th["t"], reverse=True)
-                    if recent:
-                        th = recent[0]
-                        aim_yaw = math.atan2(th["pos"][1] - my_muzzle[1], th["pos"][0] - my_muzzle[0])
-                    elif self.recent_sounds:
-                        aim_yaw = self.recent_sounds[-1][1]
-                    else:
-                        base_yaw = math.atan2(move_y, move_x) if (move_x != 0.0 or move_y != 0.0) else me["aim"][0]
-                        aim_yaw = wrap_angle(base_yaw + 1.15 * math.sin(t * 1.5))
+                    base_yaw = math.atan2(move_y, move_x) if (move_x != 0.0 or move_y != 0.0) else me["aim"][0]
+                    aim_yaw = wrap_angle(base_yaw + 1.15 * math.sin(t * 1.5))
 
             for w in me["weapons"]:
                 if w and w["kind"] == "gun" and w.get("reload", 0.0) <= 0.0:
