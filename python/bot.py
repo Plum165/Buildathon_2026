@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v14"
+    name = "hybrid-v15"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -752,6 +752,7 @@ class Bot:
         if not offer:
             return 0
         me = obs["self"]
+        hp_frac = float(me["hp"]) / max(1.0, float(me["max_hp"]))
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
         best_i, best_score = 0, -1e9
         for idx, choice in enumerate(offer["choices"]):
@@ -773,7 +774,7 @@ class Bot:
                     if req == "gun" or path.startswith("gun"):
                         score += 132.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 96.0
                     elif "damage_mult" in path or "armor" in path:
-                        score += 128.0
+                        score += 142.0 if hp_frac < 0.70 else 128.0
                     elif req == "laser" or path.startswith("laser"):
                         score += 118.0 if "charge" in path else 104.0
                     elif "max_hp" in path:
@@ -1314,7 +1315,11 @@ class Bot:
         if los_mechs:
             target_mech = min(
                 los_mechs,
-                key=lambda m: horiz_dist(me["pos"], m["pos"]) + float(m.get("hp", 1000.0)) * 0.20,
+                key=lambda m: (
+                    horiz_dist(me["pos"], m["pos"])
+                    + float(m.get("hp", 1000.0)) * 0.20
+                    - (360.0 if float(m.get("hp", 1000.0)) < hp * 0.55 else 0.0)
+                ),
             )
         elif vis_mechs:
             target_mech = min(vis_mechs, key=lambda m: horiz_dist(me["pos"], m["pos"]))
@@ -1422,10 +1427,20 @@ class Bot:
 
         else:
             mode = "PATROL"
-            ang_patrol = t * 0.35
-            pat_r = min(nr * 0.52, max(8.0, nr - 20.0))
-            goal_x = nc[0] + pat_r * math.cos(ang_patrol)
-            goal_y = nc[1] + pat_r * math.sin(ang_patrol)
+            patrol_candidates: List[Tuple[float, float, float]] = []
+            for c in obs["cubes"]:
+                cx, cy = float(c["pos"][0]), float(c["pos"][1])
+                d_zone = math.hypot(cx - nc[0], cy - nc[1])
+                d_me = math.hypot(cx - mx, cy - my)
+                if d_zone <= nr * 0.92:
+                    patrol_candidates.append((d_me, cx, cy))
+            if patrol_candidates:
+                _, goal_x, goal_y = min(patrol_candidates)
+            else:
+                ang_patrol = t * 0.35
+                pat_r = min(nr * 0.52, max(8.0, nr - 20.0))
+                goal_x = nc[0] + pat_r * math.cos(ang_patrol)
+                goal_y = nc[1] + pat_r * math.sin(ang_patrol)
 
         if not use_local_fight_move:
             wp_reached = self.cached_wp is not None and math.hypot(self.cached_wp[0] - mx, self.cached_wp[1] - my) < 3.5
@@ -1620,7 +1635,11 @@ class Bot:
                         g_speed = float(st.get("speed", 252.0))
                         ammo = float(w.get("ammo", 0.0))
                         reloading = float(w.get("reload", 0.0)) > 0.10
-                        if ammo <= 3 and not has_los_target and float(w.get("reload", 0.0)) <= 0.0:
+                        mag = float(st.get("mag", 12.0))
+                        if (
+                            ammo <= 1
+                            or (ammo <= mag * 0.20 and (reload_cover_dip or not has_los_target))
+                        ) and float(w.get("reload", 0.0)) <= 0.0:
                             want_reload = True
                         if not reloading and ammo > 0 and d_to_target <= g_range and has_los_target:
                             g_yaw, g_pitch = solve_lead_aim(my_muzzle, t_com, t_vel, g_speed)
