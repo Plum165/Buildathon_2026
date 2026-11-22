@@ -1,35 +1,27 @@
-> *This document serves as a template for you to write **setup** instructions for your project.* 
-
-> Depending on the scale/complexity of your project, it may prove beneficial to have a **Python/Batch/Bash** script in the `scripts/` directory which *automatically sets-up* the project.
-
 # Setup Instructions
 
-Follow the steps below to set up and run the project. (Example)
+The bot and protocol checker use only the Python standard library.
 
----
+## Requirements
 
-## 📦 Requirements
-``` c
-// TODO: List software, runtimes, frameworks, and or dependencies
-// along with instructions on how to set each up.
-```
-- Example: Node.js v18+
-- Example: Python 3.10
-- Example: Docker
+- Python 3.9 or later
+- Docker (for building the submission image)
 
----
+## Verify the bot
 
-## ⚙️ Installation
-``` bash
-# Clone the repository
-git clone <your-repo-url>
-cd <repo-name>
+From the repository root, run the recorded protocol stream through the bot:
 
-# Install dependencies
-<insert command here>
+```sh
+python tests/check.py -- python -u src/bot.py
 ```
 
-## ▶️ Running the Project
-``` bash
-<insert run command here> # Or an explanation on what to do
+## Build the image
+
+Build from the repository root so the root Dockerfile can copy `src/`:
+
+```sh
+docker build -t mechfight-bot .
 ```
+
+The scorer runs the image with restricted network, CPU, memory, and filesystem access. Do not rely
+on network access or write files outside `/tmp`.

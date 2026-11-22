@@ -2,21 +2,21 @@
 
 This document is the complete specification for writing a bot. A bot is a program that pilots one mech in a 16-mech free-for-all on the Ohio State campus (Ohio Stadium to the Oval). Your bot reads observations on stdin and writes actions on stdout. The server is authoritative; your bot only sends intentions.
 
-**Machine-readable contract:** `mechfight.schema.json` (JSON Schema, draft-07) describes every message below: `ServerMessage` (`hello`, `obs`, `end`) and `BotMessage` (`ready`, action). Generate your types from it. In the repo it is `kit/mechfight.schema.json`; in the bot kit it sits next to this file.
+**Machine-readable contract:** `mechfight.schema.json` (JSON Schema, draft-07) describes every message below: `ServerMessage` (`hello`, `obs`, `end`) and `BotMessage` (`ready`, action). Generate your types from it. In this repository it is next to this file.
 
-**Bot kit:** This document, the schema, single-file wrappers for Python (`python/mechfight.py`, standard library only) and TypeScript (`ts/mechfight.ts`, no dependencies) with an example bot each, Dockerfiles, a conformance check, and the map. The wrappers only handle the stdin/stdout loop, typed messages, and debug drawing. Everything else (navigation, aiming, and a model of the world) is yours to build.
+**Bot kit:** This document, the schema, single-file wrappers for Python (`../src/mechfight.py`, standard library only) and TypeScript (`../vendor/typescript/mechfight.ts`, no dependencies), a Python example bot, a conformance check, and the map. The wrappers only handle the stdin/stdout loop, typed messages, and debug drawing. Everything else (navigation, aiming, and a model of the world) is yours to build.
 
 ## 1. Packaging, testing, and submitting
 
 ### Docker packaging
 
-Your bot is a Docker image whose entrypoint speaks this protocol on stdin and stdout. The kit's `python/Dockerfile` and `ts/Dockerfile` are ready to use:
+Your bot is a Docker image whose entrypoint speaks this protocol on stdin and stdout. The repository-root `Dockerfile` builds the Python example bot:
 
 ```dockerfile
 FROM python:3.13-slim
 WORKDIR /bot
-COPY . .
-ENTRYPOINT ["python3", "-u", "/bot/example_bot.py"]
+COPY src/ /bot/src/
+ENTRYPOINT ["python3", "-u", "/bot/src/bot.py"]
 ```
 
 - There is no network at runtime, so vendor every dependency into the image.
@@ -26,7 +26,7 @@ ENTRYPOINT ["python3", "-u", "/bot/example_bot.py"]
 
 ### Conformance check
 
-`check/check.py` (standard library only) feeds your bot a recorded `hello` and 300 observations from a real match. It checks that your bot:
+`tests/check.py` (standard library only) feeds your bot a recorded `hello` and 300 observations from a real match. It checks that your bot:
 
 - sends `ready` within the hello budget
 - sends one schema-valid action per observation, echoing its `tick`
@@ -35,19 +35,19 @@ ENTRYPOINT ["python3", "-u", "/bot/example_bot.py"]
 - keeps debug drawings inside the caps
 - exits cleanly after `end`
 
-`check/check.py` is not a simulation. The observations do not react to your actions.
+`tests/check.py` is not a simulation. The observations do not react to your actions.
 
 ```sh
-python3 check/check.py -- python3 -u python/example_bot.py
-docker build -t my-bot python
-python3 check/check.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "$PWD/arena:/arena:ro" my-bot
+python3 tests/check.py -- python3 -u src/bot.py
+docker build -t my-bot .
+python3 tests/check.py --map-dir /arena -- docker run --rm -i --network none --cpus 1 --memory 512m --read-only --tmpfs /tmp:rw,size=64m --user 65534:65534 -v "$PWD/assets/map:/arena:ro" my-bot
 ```
 
-`--map-dir /arena` makes `hello.map.dir` the path the map has inside the container, as in a match. Without it the check sends the kit folder's path on your machine, which a container cannot open. The `docker run` flags are the match sandbox (§3): the scorer runs this same check that way before your matches, so a bot that passes only without them is rejected.
+`--map-dir /arena` makes `hello.map.dir` the path the map has inside the container, as in a match. Without it the check sends the local `assets/map` path, which a container cannot open. The `docker run` flags are the match sandbox (§3): the scorer runs this same check that way before your matches, so a bot that passes only without them is rejected.
 
 ### Submitting for real games
 
-Push your bot to a public GitHub repository with the `Dockerfile` at its top level (copy the files of `python/` or `ts/` there), and submit it on the Mech Royale track page (joinbuilders.org/buildathon). The repository may hold 20 MB at the commit you submit. It is built on linux/amd64 with the network on, and the build must finish in 10 minutes. Each submission is built, checked with `check.py`, and played in 48 practice matches against built-in bots. The page shows your score, or what to fix when a submission is rejected.
+Push this repository with its root `Dockerfile` and submit it on the Mech Royale track page (joinbuilders.org/buildathon). The repository may hold 20 MB at the commit you submit. It is built on linux/amd64 with the network on, and the build must finish in 10 minutes. Each submission is built, checked with `tests/check.py`, and played in 48 practice matches against built-in bots. The page shows your score, or what to fix when a submission is rejected.
 
 ## 2. Match lifecycle and timing
 

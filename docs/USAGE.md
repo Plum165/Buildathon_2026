@@ -1,35 +1,22 @@
-> *This document serves as a template for you to write **usage** instructions for your project.* 
-
 # Usage Guide
 
-## ▶️ Running the Application
-``` c
-// TODO: Explain how to launch the project.
-// Add commands or steps here.
-```
-``` bash
-# Example
-npm start
+## Run the conformance check
+
+The checker feeds a recorded game stream to the bot and validates its protocol responses:
+
+```sh
+python tests/check.py -- python -u src/bot.py
 ```
 
-## 🖥️ How to Use
-``` c
-// TODO: Provide step-by-step usage instructions for judges/users.
-```
-1. Step 1 -> Do this
-2. Step 2 -> Then this
-3. Step 3 -> See the output/result
+## Build and run with Docker
 
-## 🎥 Demo
-``` c
-// TODO: Link your demo video and PowerPoint here
+```sh
+docker build -t mechfight-bot .
+docker run --rm -i mechfight-bot
 ```
-Check out the Demos: 
-- [Demo Video](../demo/demo.mp4)
-- [Demo Presentation](../demo/demo.pptx)
 
-## 📌 Notes
-``` c
-// TODO: Add any special instructions, caveats, or tips
-// for using your project.
-```
+The image expects the game protocol on standard input and writes protocol responses to standard
+output. For the full message contract, see [protocol.md](protocol.md).
+
+The bundled bot is an example baseline: it moves toward the next zone, picks nearby loot, and fires
+at the nearest visible mech. Passing the checker confirms protocol compliance, not match performance.
