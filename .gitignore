@@ -96,3 +96,5 @@ coverage/
 .env
 .env.local
 .env.*.local
+
+ts/
