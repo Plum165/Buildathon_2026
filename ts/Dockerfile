@@ -3,4 +3,5 @@
 FROM python:3.13-slim
 WORKDIR /bot
 COPY . .
-ENTRYPOINT ["python3", "-u", "/python/bot.py"]
+ENV PYTHONPATH=/bot:/bot/python
+ENTRYPOINT ["python3", "-u", "/bot/python/bot.py"]
