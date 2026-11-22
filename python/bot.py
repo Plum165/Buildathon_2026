@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v21-offense"
+    name = "hybrid-v22-highpower"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -769,31 +769,29 @@ class Bot:
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
-                    # Bias upgrade offers toward immediate damage and faster engagements.
+                    # Bias toward upgrades that increase damage uptime or burst.
                     if req == "gun" or path.startswith("gun"):
-                        score += 150.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 125.0
+                        score += 155.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 128.0
+                    elif "damage_mult" in path or "armor" in path:
+                        score += 105.0 if "damage_mult" in path else 82.0
                     elif req == "laser" or path.startswith("laser"):
-                        score += 145.0 if "charge" in path or "damage" in path else 120.0
-                    elif req == "mortar" or path.startswith("mortar"):
-                        score += 132.0
-                    elif req == "lightning" or path.startswith("lightning"):
-                        score += 128.0
-                    elif "turn_rate" in path or "pitch_rate" in path:
-                        score += 116.0
-                    elif "walk_speed" in path or "boost_speed" in path:
-                        score += 112.0
-                    elif "damage_mult" in path:
-                        score += 120.0
-                    elif "armor" in path:
-                        score += 82.0
+                        score += 150.0 if "charge" in path or "damage" in path else 125.0
                     elif "max_hp" in path:
                         score += 88.0
+                    elif "walk_speed" in path or "boost_speed" in path:
+                        score += 112.0
+                    elif req == "mortar" or path.startswith("mortar"):
+                        score += 138.0
                     elif "regen_delay" in path or "regen_per_s" in path:
                         score += 72.0
                     elif "energy" in path or "jet" in path:
-                        score += 90.0
+                        score += 96.0
+                    elif req == "lightning" or path.startswith("lightning"):
+                        score += 130.0
                     elif "near_range" in path or "bearing_noise" in path or "vision" in path:
-                        score += 84.0
+                        score += 82.0
+                    elif "turn_rate" in path or "pitch_rate" in path:
+                        score += 116.0
                     else:
                         score += abs(mul - 1.0) * 40.0 + abs(add) * 2.0
             else:
@@ -1171,7 +1169,6 @@ class Bot:
 
         t1_scale = 1.0 + self.size_per_cube * float(target_mech.get("cubes", 0.0))
         t1_eye = [tx, ty, target_mech["pos"][2] + 8.0 * t1_scale]
-        target_visible = any(m["id"] == target_mech["id"] for m in los_mechs)
         other_threat = None
         for m2 in los_mechs:
             if m2["id"] != target_mech["id"]:
@@ -1191,9 +1188,7 @@ class Bot:
 
         best_dx, best_dy = math.cos(tang_pref), math.sin(tang_pref)
         best_score = -1e9
-        do_iso_los = (
-            t2_eye is not None or reload_hide or not target_visible
-        ) and ((time.perf_counter() - t_wall0) < 0.011)
+        do_iso_los = (t2_eye is not None or reload_hide) and ((time.perf_counter() - t_wall0) < 0.011)
 
         for k in range(16):
             ang = k * (math.pi / 8.0)
@@ -1220,8 +1215,6 @@ class Bot:
                 cz = self.world.terrain_z(nx_p, ny_p)
                 c_eye = [nx_p, ny_p, cz + eye_h]
                 see_t1 = self.world.has_los(c_eye, t1_eye)
-                if not target_visible and see_t1:
-                    score += 55.0
                 if reload_hide and not see_t1:
                     score += 30.0
                 if t2_eye is not None:
@@ -1321,11 +1314,7 @@ class Bot:
         if los_mechs:
             target_mech = min(
                 los_mechs,
-                key=lambda m: (
-                    horiz_dist(me["pos"], m["pos"])
-                    + float(m.get("hp", 1000.0)) * 0.10
-                    - (65.0 if float(m.get("hp", 1000.0)) < 500.0 else 0.0)
-                ),
+                key=lambda m: horiz_dist(me["pos"], m["pos"]) + float(m.get("hp", 1000.0)) * 0.20,
             )
         elif vis_mechs:
             target_mech = min(vis_mechs, key=lambda m: horiz_dist(me["pos"], m["pos"]))
@@ -1335,7 +1324,14 @@ class Bot:
         target_hp = float(target_mech.get("hp", 1000.0)) if target_mech else 9999.0
 
         kill_confirm = target_mech is not None and target_hp < 550.0 and hp > 280.0 and len(los_mechs) <= 2
-        need_retreat = False
+        outnumbered = len(los_mechs) >= 2 and hp_frac < 0.55 and target_hp >= 450.0
+        losing_duel = (
+            target_mech is not None
+            and not kill_confirm
+            and hp_frac < 0.26
+            and target_hp > hp * 1.6
+        )
+        need_retreat = outnumbered or losing_duel
 
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
         gun_reloading = any(w and w["kind"] == "gun" and float(w.get("reload", 0.0)) > 0.30 for w in me["weapons"])
@@ -1389,16 +1385,18 @@ class Bot:
             mode = "KILL" if kill_confirm else ("RELOAD" if reload_cover_dip else "FIGHT")
             e_weapons = set(target_mech.get("weapons", []))
 
-            # Close aggressively to maximize gun pressure and enable close-range weapons.
-            desired_dist = 30.0 if not reload_cover_dip else 38.0
+            # High-power test: accept closer fights to increase hit rate and uptime.
+            desired_dist = 46.0 if (len(los_mechs) >= 2 or reload_cover_dip) else 34.0
             if kill_confirm:
-                desired_dist = 24.0
+                desired_dist = 26.0
             elif "lightning" in e_weapons and "lightning" not in held_kinds:
-                desired_dist = 48.0
+                desired_dist = 56.0
             elif "lightning" in held_kinds and target_mech.get("charging") and energy > 38.0 and d_target_2d < 65.0:
-                desired_dist = 24.0
+                desired_dist = 26.0
             elif "mortar" in held_kinds and "laser" not in held_kinds and not has_los_target:
-                desired_dist = 58.0
+                desired_dist = 66.0
+            if d_target_2d > desired_dist + 10.0 and energy > 42.0:
+                want_boost = True
 
             if has_los_target or d_target_2d < 70.0:
                 use_local_fight_move = True
@@ -1410,8 +1408,8 @@ class Bot:
             else:
                 goal_x, goal_y = target_mech["pos"][0], target_mech["pos"][1]
 
-            # Spend energy to close distance, but retain some reserve for evasion.
-            if d_target_2d > desired_dist + 12.0 and energy > 38.0:
+            # Strafe-flip boost burst (breaks enemy lead right on direction change, reserves >=40 energy)
+            if has_los_target and energy > 65.0 and ((t - self.last_flip_t) < 0.25 or reload_cover_dip):
                 want_boost = True
 
         elif farm_obj is not None:
@@ -1601,8 +1599,7 @@ class Bot:
                             else:
                                 fire[slot_i] = True
                         elif cd <= 0.10 and d_to_target <= l_range and has_los_target and err_y < 0.45:
-                            if not (hp_frac < 0.32 and d_to_target < 38.0):
-                                fire[slot_i] = True
+                            fire[slot_i] = True
 
                     elif kind == "mortar":
                         if mortar_sol is not None and cd <= 0.10:
