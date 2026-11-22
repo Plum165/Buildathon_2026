@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Mechfight protocol template",
+  "description": "Template only. Replace this generic schema with the authoritative Mechfight request and response definitions.",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": true
+}

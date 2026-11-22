@@ -7,7 +7,9 @@ Template for all users
 ## 📂 Repository Structure
 ```
 ├── assets/
-│   └── README.md
+│   ├── README.md
+│   └── map/
+│       └── README.md
 ├── demo/
 │   ├── OVERVIEW.md
 │   └── README.md
@@ -15,14 +17,29 @@ Template for all users
 │   ├── ACKNOWLEDGEMENTS.md
 │   ├── SETUP.md
 │   ├── TEAM.md
-│   └── USAGE.md
-├── scripts/
-│   └── README.md
+│   ├── USAGE.md
+│   ├── STRATEGY.md
+│   └── EXPERIMENTS.md
 ├── src/
-│   └── README.md
-│   └── backend/
-│   └── frontend/
-
+│   ├── README.md
+│   ├── bot.py
+│   ├── strategy/
+│   │   ├── survival.py
+│   │   ├── navigation.py
+│   │   ├── combat.py
+│   │   ├── targeting.py
+│   │   ├── loot.py
+│   │   └── upgrades.py
+│   └── utils/
+│       ├── geometry.py
+│       ├── map_utils.py
+│       └── README.md
+├── tests/
+│   ├── README.md
+│   └── test_strategy.py
+├── scripts/
+│   ├── README.md
+│   └── benchmark.py
 ├── vendor/
 │   └── README.md
 ├── .dockerignore
@@ -30,8 +47,10 @@ Template for all users
 ├── .gitattributes
 ├── .gitignore
 ├── Dockerfile
-├── LICENSE
-└── README.md
+├── protocol.md
+├── mechfight.schema.json
+├── README.md
+└── LICENSE
 ```
 ---
 
@@ -49,12 +68,20 @@ Template for all users
     - `SETUP.md` → Instructions for installing dependencies and running the project  
     - `TEAM.md` → Team member names, roles, and contact info  [if worked with people]
     - `USAGE.md` → Instructions for using or testing the project 
+    - `STRATEGY.md` → Describes the bot's decision-making approach
+    - `EXPERIMENTS.md` → Records experiments, results, and conclusions
 
 - **scripts/**  
     All **utility**, **automation** and **project-management** scripts should be placed in this folder.
 
 - **src/**  
     All source code files should be placed in this folder. You may organize this folder as needed (e.g., `backend/`, `frontend/`, `lib/`, `source/` and or `include/` folders and so on).
+
+- **tests/**
+    Automated tests for the project.
+
+- **protocol.md** and **mechfight.schema.json**
+    Templates for documenting the game protocol and describing its JSON data shape. Complete them to match the actual specification before relying on them.
 
 - **vendor/**  
     All third-party libraries, code and or submodules should be placed in this folder along **with the appropriate licensing and or references**. If you are not able to link the modules from this folder to your codebase properly, you may put the third-party modules inside the `src/` folder with the rest of your code however, it **must be made clear** which modules are **third-party**, along with their **licensing**.
