@@ -1,4 +1,4 @@
-"""Balanced offense + active defense (v9 4.22 core + reload cover-dip & strafe-boost) for mechfight/1."""
+"""Rules-aware survival, weapon control, and objective prioritization for mechfight/1."""
 from __future__ import annotations
 
 import array
@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v15"
+    name = "hybrid-v16"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -763,34 +763,43 @@ class Bot:
                 req = udef.get("requires")
                 if req and req not in held_kinds:
                     score -= 60.0
-                elif req == "lightning" and ("laser" not in held_kinds and "mortar" not in held_kinds):
-                    score -= 25.0
 
                 for eff in udef.get("effects", []):
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
-                    # Balanced offense + defense: gun > armor > laser > max_hp > speed
-                    if req == "gun" or path.startswith("gun"):
-                        score += 132.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 96.0
-                    elif "damage_mult" in path or "armor" in path:
-                        score += 142.0 if hp_frac < 0.70 else 128.0
-                    elif req == "laser" or path.startswith("laser"):
-                        score += 118.0 if "charge" in path else 104.0
-                    elif "max_hp" in path:
-                        score += 115.0
+                    if uid in ("armor", "plating"):
+                        score += 148.0 if hp_frac < 0.70 else 132.0
+                    elif uid == "nanites":
+                        score += 126.0 if hp_frac < 0.70 else 112.0
+                    elif uid in ("servos", "jets"):
+                        score += 118.0
+                    elif uid in ("capacitor", "reactor"):
+                        score += 108.0
+                    elif uid == "gyros":
+                        score += 102.0
+                    elif uid in ("gun_damage", "gun_rate"):
+                        score += 138.0
+                    elif uid == "gun_velocity":
+                        score += 122.0
+                    elif uid == "gun_mag":
+                        score += 116.0
+                    elif uid in ("laser_charge", "laser_damage", "laser_pierce"):
+                        score += 112.0
+                    elif uid in ("mortar_splash", "mortar_reload", "mortar_velocity"):
+                        score += 104.0
+                    elif uid in ("lightning_chain", "lightning_range", "lightning_efficiency"):
+                        score += 76.0
+                    elif uid == "sensors":
+                        score += 82.0
+                    elif "armor" in path or "hp" in path:
+                        score += 128.0
                     elif "walk_speed" in path or "boost_speed" in path:
                         score += 105.0
-                    elif req == "mortar" or path.startswith("mortar"):
-                        score += 98.0
-                    elif "regen_delay" in path or "regen_per_s" in path:
+                    elif "regen" in path:
                         score += 92.0
                     elif "energy" in path or "jet" in path:
                         score += 86.0
-                    elif req == "lightning" or path.startswith("lightning"):
-                        score += 68.0
-                    elif "near_range" in path or "bearing_noise" in path or "vision" in path:
-                        score += 65.0
                     elif "turn_rate" in path or "pitch_rate" in path:
                         score += 55.0
                     else:
@@ -1079,6 +1088,50 @@ class Bot:
         target_r = min(nr * 0.62, max(0.0, nr - 15.0))
         return nc[0] + target_r * math.cos(ang), nc[1] + target_r * math.sin(ang)
 
+    def _eval_drop_target(
+        self, obs: mf.Observation, cur_zc: List[float], cur_zr: float,
+    ) -> Optional[Tuple[float, float, str]]:
+        me = obs["self"]
+        mx, my, _ = me["pos"]
+        hp_frac = float(me["hp"]) / max(1.0, float(me["max_hp"]))
+        energy_frac = float(me["energy"]) / max(1.0, float(me["stats"].get("energy", 100.0)))
+        nc = obs["zone"]["next_center"]
+        nr = max(8.0, float(obs["zone"]["next_radius"]))
+
+        best: Optional[Tuple[float, float, str]] = None
+        best_score = 0.0
+        for drop in obs.get("drops", []):
+            lands_in = float(drop.get("lands_in", 1e9))
+            px, py = float(drop["pos"][0]), float(drop["pos"][1])
+            d_me = math.hypot(px - mx, py - my)
+            d_zone = math.hypot(px - cur_zc[0], py - cur_zc[1])
+            d_next = math.hypot(px - nc[0], py - nc[1])
+            if d_zone > cur_zr - 8.0 or d_next > nr - 8.0:
+                continue
+            if lands_in > 18.0 and d_me > 110.0:
+                continue
+            if lands_in > 8.0 and d_me > 55.0 and hp_frac >= 0.55:
+                continue
+            if d_me > 180.0:
+                continue
+            holder = drop.get("holder")
+            if lands_in <= 0.5 and holder is not None and holder != int(me["id"]):
+                continue
+
+            urgency = 1.0 if hp_frac < 0.75 or energy_frac < 0.60 else 0.55
+            score = (260.0 - d_me) * urgency
+            if lands_in <= 8.0:
+                score += 90.0
+            if lands_in <= 0.5:
+                score += 160.0
+            if holder == int(me["id"]):
+                score += 220.0
+            if score > best_score:
+                best_score = score
+                best = (px, py, "DROP")
+
+        return best
+
     def _has_mech_los(self, t: float, my_eye: List[float], m: Dict[str, Any]) -> bool:
         if t - self.direct_hit_by_t.get(int(m["id"]), -10.0) < 0.45:
             return True
@@ -1317,8 +1370,8 @@ class Bot:
                 los_mechs,
                 key=lambda m: (
                     horiz_dist(me["pos"], m["pos"])
-                    + float(m.get("hp", 1000.0)) * 0.20
-                    - (360.0 if float(m.get("hp", 1000.0)) < hp * 0.55 else 0.0)
+                    + float(m.get("hp", 1000.0)) * 0.10
+                    - (90.0 if float(m.get("hp", 1000.0)) < hp * 0.55 else 0.0)
                 ),
             )
         elif vis_mechs:
@@ -1333,7 +1386,7 @@ class Bot:
         losing_duel = (
             target_mech is not None
             and not kill_confirm
-            and hp_frac < 0.26
+            and hp_frac < 0.35
             and target_hp > hp * 1.6
         )
         need_retreat = outnumbered or losing_duel
@@ -1367,6 +1420,9 @@ class Bot:
         loot_goal = None
         if not zone_escape and not need_retreat and not zone_rotate:
             loot_goal = self._eval_loot_target(obs, cur_zc, cur_zr, has_los_target, d_target_2d)
+        drop_goal = None
+        if not zone_escape and not need_retreat and not zone_rotate and not kill_confirm:
+            drop_goal = self._eval_drop_target(obs, cur_zc, cur_zr)
 
         if zone_escape:
             mode = "ZONE_ESC"
@@ -1382,6 +1438,11 @@ class Bot:
         elif zone_rotate:
             mode = "ROTATE"
             goal_x, goal_y = self._safe_anchor(obs)
+
+        elif drop_goal is not None:
+            goal_x, goal_y, mode = drop_goal
+            if math.hypot(goal_x - mx, goal_y - my) < 12.0:
+                want_boost = False
 
         elif loot_goal is not None and not kill_confirm and not (has_los_target and d_target_2d < 70.0 and loot_goal[2] != "CUBE"):
             goal_x, goal_y, mode = loot_goal
