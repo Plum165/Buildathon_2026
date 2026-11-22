@@ -1,4 +1,4 @@
-"""Survival-first positioning and weapon control for mechfight/1."""
+"""Balanced offense + active defense (v9 4.22 core + reload cover-dip & strafe-boost) for mechfight/1."""
 from __future__ import annotations
 
 import array
@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v17"
+    name = "hybrid-v14"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -752,7 +752,6 @@ class Bot:
         if not offer:
             return 0
         me = obs["self"]
-        hp_frac = float(me["hp"]) / max(1.0, float(me["max_hp"]))
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
         best_i, best_score = 0, -1e9
         for idx, choice in enumerate(offer["choices"]):
@@ -763,32 +762,36 @@ class Bot:
                 req = udef.get("requires")
                 if req and req not in held_kinds:
                     score -= 60.0
+                elif req == "lightning" and ("laser" not in held_kinds and "mortar" not in held_kinds):
+                    score -= 25.0
 
                 for eff in udef.get("effects", []):
                     path = eff.get("path", "")
                     mul = float(eff.get("mul", 1.0))
                     add = float(eff.get("add", 0.0))
-                    # Survival comes before DPS: armor, plating and mobility keep
-                    # a mech alive; weapon upgrades are only chosen as a controlled
-                    # alternative when the damage choice materially improves odds.
-                    if uid in ("armor", "plating", "nanites"):
-                        score += 150.0 if hp_frac < 0.75 else 128.0
-                    elif uid in ("servos", "jets"):
-                        score += 122.0
-                    elif uid in ("capacitor", "reactor"):
-                        score += 108.0
-                    elif req == "gun" or path.startswith("gun"):
+                    # Balanced offense + defense: gun > armor > laser > max_hp > speed
+                    if req == "gun" or path.startswith("gun"):
                         score += 132.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 96.0
+                    elif "damage_mult" in path or "armor" in path:
+                        score += 128.0
                     elif req == "laser" or path.startswith("laser"):
                         score += 118.0 if "charge" in path else 104.0
+                    elif "max_hp" in path:
+                        score += 115.0
+                    elif "walk_speed" in path or "boost_speed" in path:
+                        score += 105.0
                     elif req == "mortar" or path.startswith("mortar"):
                         score += 98.0
+                    elif "regen_delay" in path or "regen_per_s" in path:
+                        score += 92.0
+                    elif "energy" in path or "jet" in path:
+                        score += 86.0
                     elif req == "lightning" or path.startswith("lightning"):
                         score += 68.0
-                    elif "turn_rate" in path or "pitch_rate" in path:
-                        score += 75.0
-                    elif "near_range" in path or "vision" in path:
+                    elif "near_range" in path or "bearing_noise" in path or "vision" in path:
                         score += 65.0
+                    elif "turn_rate" in path or "pitch_rate" in path:
+                        score += 55.0
                     else:
                         score += abs(mul - 1.0) * 40.0 + abs(add) * 2.0
             else:
@@ -1321,10 +1324,7 @@ class Bot:
         target_hp = float(target_mech.get("hp", 1000.0)) if target_mech else 9999.0
 
         kill_confirm = target_mech is not None and target_hp < 550.0 and hp > 280.0 and len(los_mechs) <= 2
-        crossfire = len(los_mechs) >= 3 or (len(los_mechs) >= 2 and hp_frac < 0.72)
-        outnumbered = crossfire or (
-            len(los_mechs) >= 2 and hp_frac < 0.55 and target_hp >= 450.0
-        )
+        outnumbered = len(los_mechs) >= 2 and hp_frac < 0.55 and target_hp >= 450.0
         losing_duel = (
             target_mech is not None
             and not kill_confirm
@@ -1360,13 +1360,7 @@ class Bot:
         use_local_fight_move = False
 
         loot_goal = None
-        if (
-            not zone_escape
-            and not need_retreat
-            and not zone_rotate
-            and not crossfire
-            and hp_frac > 0.58
-        ):
+        if not zone_escape and not need_retreat and not zone_rotate:
             loot_goal = self._eval_loot_target(obs, cur_zc, cur_zr, has_los_target, d_target_2d)
 
         if zone_escape:
