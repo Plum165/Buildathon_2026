@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v24-snowball"
+    name = "hybrid-v25-counterloadout"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -829,18 +829,38 @@ class Bot:
         if not nearby:
             return {}
 
-        nearby.sort(key=lambda p: WEAPON_PRIORITY.get(p["kind"], 0), reverse=True)
-        best_p = nearby[0]
-        p_prio = WEAPON_PRIORITY.get(best_p["kind"], 0)
+        enemies = [
+            m for m in obs["mechs"]
+            if m["kind"] == "mech" and horiz_dist(me["pos"], m["pos"]) <= 150.0
+        ]
+        nearest_enemy = min(
+            enemies, key=lambda m: horiz_dist(me["pos"], m["pos"]), default=None
+        )
+        enemy_kinds = set(nearest_enemy.get("weapons", [])) if nearest_enemy else set()
+        counters = {
+            "laser": {"mortar": 1.5, "lightning": -1.5},
+            "mortar": {"lightning": 1.5, "laser": -1.5},
+            "lightning": {"laser": 1.5, "mortar": -1.5},
+        }
+
+        def weapon_value(kind: str) -> float:
+            value = float(WEAPON_PRIORITY.get(kind, 0))
+            for enemy_kind in enemy_kinds:
+                value += counters.get(kind, {}).get(enemy_kind, 0.0)
+            return value
+
+        best_p = max(nearby, key=lambda p: weapon_value(p["kind"]))
+        p_value = weapon_value(best_p["kind"])
 
         for s in (1, 0):
             if weapons[s] is None:
                 return {"take": int(best_p["id"])}
 
-        worst_slot = 1
-        if WEAPON_PRIORITY.get(weapons[0]["kind"], 0) < WEAPON_PRIORITY.get(weapons[1]["kind"], 0):
-            worst_slot = 0
-        if p_prio > WEAPON_PRIORITY.get(weapons[worst_slot]["kind"], 0):
+        worst_slot = min(
+            (0, 1),
+            key=lambda slot: weapon_value(weapons[slot]["kind"]),
+        )
+        if p_value > weapon_value(weapons[worst_slot]["kind"]):
             return {"take": int(best_p["id"]), "drop": worst_slot}
         return {}
 
@@ -1347,26 +1367,7 @@ class Bot:
         reload_cover_dip = gun_reloading and (not special_ready) and (not kill_confirm)
 
         farm_obj: Optional[Tuple[List[float], List[float], str]] = None
-        early_farm_window = (
-            t < 150.0
-            and obs["alive"] >= 7
-            and me["cubes"] < min(self.cube_stat_cap, 6)
-            and hp_frac > 0.60
-        )
-        distant_fight = (
-            target_mech is not None
-            and not kill_confirm
-            and d_target_2d > 100.0
-            and len(los_mechs) <= 1
-            and early_farm_window
-        )
-        if (
-            not zone_escape
-            and not zone_rotate
-            and (target_mech is None or distant_fight)
-            and len(los_mechs) <= 1
-            and me["cubes"] < min(self.cube_stat_cap, 6)
-        ):
+        if not zone_escape and not zone_rotate and target_mech is None and len(los_mechs) == 0 and me["cubes"] < self.cube_stat_cap:
             near_npc = min(vis_npcs, key=lambda n: horiz_dist(me["pos"], n["pos"]), default=None)
             near_crate = min(obs["crates"], key=lambda c: horiz_dist(me["pos"], c["pos"]), default=None)
             if near_npc and horiz_dist(me["pos"], near_npc["pos"]) < 95.0 and hp_frac > 0.58:
@@ -1405,7 +1406,7 @@ class Bot:
         elif loot_goal is not None and not kill_confirm and not (has_los_target and d_target_2d < 70.0 and loot_goal[2] != "CUBE"):
             goal_x, goal_y, mode = loot_goal
 
-        elif target_mech is not None and not (distant_fight and farm_obj is not None):
+        elif target_mech is not None:
             mode = "KILL" if kill_confirm else ("RELOAD" if reload_cover_dip else "FIGHT")
             e_weapons = set(target_mech.get("weapons", []))
 
