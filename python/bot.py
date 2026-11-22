@@ -709,7 +709,7 @@ WEAPON_PRIORITY = {"laser": 4, "mortar": 3, "lightning": 2, "gun": 1}
 
 
 class Bot:
-    name = "hybrid-v22-highpower"
+    name = "hybrid-v23-risk-defense"
 
     def __init__(self, hello: mf.Hello) -> None:
         self.cfg = hello["config"]
@@ -752,6 +752,7 @@ class Bot:
         if not offer:
             return 0
         me = obs["self"]
+        hp_frac = float(me["hp"]) / max(1.0, float(me["max_hp"]))
         held_kinds = {w["kind"] for w in me["weapons"] if w is not None}
         best_i, best_score = 0, -1e9
         for idx, choice in enumerate(offer["choices"]):
@@ -762,37 +763,41 @@ class Bot:
                 req = udef.get("requires")
                 if req and req not in held_kinds:
                     score -= 60.0
-                elif req == "lightning" and ("laser" not in held_kinds and "mortar" not in held_kinds):
-                    score -= 25.0
-
-                for eff in udef.get("effects", []):
-                    path = eff.get("path", "")
-                    mul = float(eff.get("mul", 1.0))
-                    add = float(eff.get("add", 0.0))
-                    # Bias toward upgrades that increase damage uptime or burst.
-                    if req == "gun" or path.startswith("gun"):
-                        score += 155.0 if ("rate" in uid or "cooldown" in path or "damage" in path) else 128.0
-                    elif "damage_mult" in path or "armor" in path:
-                        score += 105.0 if "damage_mult" in path else 82.0
-                    elif req == "laser" or path.startswith("laser"):
-                        score += 150.0 if "charge" in path or "damage" in path else 125.0
-                    elif "max_hp" in path:
-                        score += 88.0
-                    elif "walk_speed" in path or "boost_speed" in path:
-                        score += 112.0
-                    elif req == "mortar" or path.startswith("mortar"):
-                        score += 138.0
-                    elif "regen_delay" in path or "regen_per_s" in path:
-                        score += 72.0
-                    elif "energy" in path or "jet" in path:
-                        score += 96.0
-                    elif req == "lightning" or path.startswith("lightning"):
-                        score += 130.0
-                    elif "near_range" in path or "bearing_noise" in path or "vision" in path:
-                        score += 82.0
-                    elif "turn_rate" in path or "pitch_rate" in path:
-                        score += 116.0
-                    else:
+                if uid in ("armor", "plating"):
+                    score += 160.0 if hp_frac < 0.65 else 138.0
+                elif uid == "nanites":
+                    score += 122.0 if hp_frac < 0.65 else 96.0
+                elif uid in ("gun_damage", "gun_rate"):
+                    score += 155.0
+                elif uid == "gun_velocity":
+                    score += 130.0
+                elif uid == "gun_mag":
+                    score += 118.0
+                elif uid in ("laser_charge", "laser_damage"):
+                    score += 155.0
+                elif uid == "laser_pierce":
+                    score += 124.0
+                elif uid in ("mortar_reload", "mortar_velocity"):
+                    score += 145.0
+                elif uid == "mortar_splash":
+                    score += 132.0
+                elif uid in ("lightning_efficiency", "lightning_range"):
+                    score += 140.0
+                elif uid == "lightning_chain":
+                    score += 126.0
+                elif uid in ("servos", "jets"):
+                    score += 122.0
+                elif uid == "gyros":
+                    score += 118.0
+                elif uid in ("capacitor", "reactor"):
+                    score += 112.0
+                elif uid == "sensors":
+                    score += 88.0
+                else:
+                    for eff in udef.get("effects", []):
+                        path = eff.get("path", "")
+                        mul = float(eff.get("mul", 1.0))
+                        add = float(eff.get("add", 0.0))
                         score += abs(mul - 1.0) * 40.0 + abs(add) * 2.0
             else:
                 desc = (choice.get("name", "") + " " + choice.get("desc", "")).lower()
